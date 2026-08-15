@@ -19,12 +19,15 @@ so these functions stay easy to unit test and reuse across pages.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 import plotly.graph_objects as go
 from dash import dcc, html
 
 import constants
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # Small string helpers
@@ -255,6 +258,7 @@ def build_choropleth_figure(
     replicating the min -> max color ramp used by the MapLibre version
     (`#e5ebf8` -> `#3675b7`, with `#e7e7e7` for missing data).
     """
+    logger.debug("Building choropleth figure for %s features (%s)", len(features), metric_label)
     colors = constants.COLORS_DARK if dark else constants.COLORS_LIGHT
 
     if not features:
@@ -348,6 +352,7 @@ def build_scatter2d_figure(
     admin_labels: Dict[str, Any],
     dark: bool = False,
 ) -> go.Figure:
+    logger.debug("Building scatter2d figure for %s points (%s vs %s)", len(points), x_label, y_label)
     colors = constants.COLORS_DARK if dark else constants.COLORS_LIGHT
     visible = [p for p in points if p["x"] is not None and p["y"] is not None]
     highlighted = [p for p in visible if p["selected"]]
@@ -403,6 +408,7 @@ def build_scatter2d_figure(
 # --------------------------------------------------------------------------
 
 def build_scatter3d_figure(points: List[Dict[str, Any]], dark: bool = False) -> go.Figure:
+    logger.debug("Building scatter3d figure for %s points", len(points))
     colors = constants.COLORS_DARK if dark else constants.COLORS_LIGHT
     visible = [p for p in points if p["x"] is not None and p["y"] is not None and p["z"] is not None]
     highlighted = [p for p in visible if p["selected"]]
@@ -445,6 +451,7 @@ def build_scatter3d_figure(points: List[Dict[str, Any]], dark: bool = False) -> 
 # --------------------------------------------------------------------------
 
 def build_waterfall_figure(group: Dict[str, Any], dark: bool = False) -> go.Figure:
+    logger.debug("Building waterfall chart for %s", group.get("scoreLabel", "unknown"))
     colors = constants.COLORS_DARK if dark else constants.COLORS_LIGHT
     rows = [r for r in group["rows"] if r["contribution"] is not None]
     rows = sorted(rows, key=lambda r: r["contribution"])
@@ -501,6 +508,7 @@ def waterfall_summary_block(group: Dict[str, Any]) -> html.Div:
 # --------------------------------------------------------------------------
 
 def build_readiness_bar_chart(status_breakdown: List[Dict[str, Any]], dark: bool = False) -> go.Figure:
+    logger.debug("Building readiness chart for %s categories", len(status_breakdown))
     colors = constants.COLORS_DARK if dark else constants.COLORS_LIGHT
     categories = [row["category"] for row in status_breakdown]
     counts = [row["count"] for row in status_breakdown]
@@ -524,6 +532,7 @@ def build_readiness_bar_chart(status_breakdown: List[Dict[str, Any]], dark: bool
 
 
 def build_publication_year_chart(year_counts: List[Dict[str, Any]], dark: bool = False) -> go.Figure:
+    logger.debug("Building publication-year chart for %s entries", len(year_counts))
     colors = constants.COLORS_DARK if dark else constants.COLORS_LIGHT
     years = [row["year"] for row in year_counts]
     counts = [row["count"] for row in year_counts]

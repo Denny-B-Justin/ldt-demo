@@ -32,6 +32,8 @@ Run for production: gunicorn app:server
 from __future__ import annotations
 
 import io
+import logging
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -43,6 +45,14 @@ from dash.exceptions import PreventUpdate
 import constants
 import queries
 import utils
+
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=os.environ.get("LDT_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # App instantiation
@@ -59,7 +69,7 @@ app = dash.Dash(
     ],
 )
 server = app.server  # exposed for gunicorn / Posit Connect (see README)
-
+logger.info("Initialized Dash app with %s country workspaces.", len(constants.COUNTRIES))
 
 # --------------------------------------------------------------------------
 # App shell (root layout) - equivalent of src/app/layout.tsx
@@ -93,6 +103,7 @@ app.layout = html.Div(
 
 def render_home() -> html.Main:
     """Port of src/app/page.tsx"""
+    logger.debug("Rendering homepage with %s country datasets.", len(constants.COUNTRIES))
     datasets = [queries.get_analytics_dataset(c["code"]) for c in constants.COUNTRIES]
     total_lsgs = sum(d.get("coverage", {}).get("analyticsMunicipalityCount", 0) for d in datasets)
     latest_year = max(d.get("release", {}).get("year", 0) for d in datasets)
@@ -1034,6 +1045,7 @@ STATIC_ROUTES = {
 
 def build_route_content(pathname: str) -> html.Main:
     pathname = (pathname or "/").rstrip("/") or "/"
+    logger.debug("Resolving route: %s", pathname)
 
     if pathname in STATIC_ROUTES:
         return STATIC_ROUTES[pathname]()
@@ -1059,8 +1071,13 @@ def build_route_content(pathname: str) -> html.Main:
     Input("url", "pathname"),
 )
 def render_page_content(pathname):
-    content = build_route_content(pathname)
-    return content, utils.app_header(pathname or "/"), utils.app_footer()
+    logger.debug("Rendering page shell for path %s", pathname)
+    try:
+        content = build_route_content(pathname)
+        return content, utils.app_header(pathname or "/"), utils.app_footer()
+    except Exception:
+        logger.exception("Failed while rendering page content for %s.", pathname)
+        raise
 
 
 # ==========================================================================
@@ -1141,10 +1158,15 @@ app.clientside_callback(
 def update_municipality_options(year, province, country_code, current_municipality_id):
     if not country_code:
         raise PreventUpdate
-    options = queries.get_municipality_options(country_code, year, province)
-    ids = {o["id"] for o in options}
-    value = current_municipality_id if current_municipality_id in ids else (options[0]["id"] if options else None)
-    return options, value
+    logger.debug("Updating municipality options for %s year=%s province=%s", country_code, year, province)
+    try:
+        options = queries.get_municipality_options(country_code, year, province)
+        ids = {o["id"] for o in options}
+        value = current_municipality_id if current_municipality_id in ids else (options[0]["id"] if options else None)
+        return options, value
+    except Exception:
+        logger.exception("Municipality dropdown update failed for %s %s %s.", country_code, year, province)
+        raise
 
 
 @app.callback(
@@ -1161,7 +1183,12 @@ def update_analytics_tab(tab, year, province, municipality_id, metric_id, theme_
     if not country_code:
         raise PreventUpdate
     dark = (theme_data or {}).get("theme") == "dark"
-    return render_analytics_tab_content(country_code, tab, year, province, municipality_id, metric_id, dark)
+    logger.debug("Updating analytics tab %s for %s (year=%s, province=%s, municipality=%s)", tab, country_code, year, province, municipality_id)
+    try:
+        return render_analytics_tab_content(country_code, tab, year, province, municipality_id, metric_id, dark)
+    except Exception:
+        logger.exception("Analytics tab render failed for country=%s tab=%s.", country_code, tab)
+        raise
 
 
 @app.callback(
@@ -1179,25 +1206,30 @@ def download_sng_csv(n_clicks_list):
     if not country:
         raise PreventUpdate
 
-    dataset = queries.load_country_dataset(country["code"])
-    latest_year = max(dataset.get("years", [dataset.get("release", {}).get("year", 0)]))
-    rows = [m for m in dataset["municipalities"] if m["year"] == latest_year]
+    logger.debug("Exporting CSV for %s country data.", country_slug)
+    try:
+        dataset = queries.load_country_dataset(country["code"])
+        latest_year = max(dataset.get("years", [dataset.get("release", {}).get("year", 0)]))
+        rows = [m for m in dataset["municipalities"] if m["year"] == latest_year]
 
-    df = pd.DataFrame([
-        {
-            country["admin_labels"]["lower"]["singular"]: m["municipality"],
-            country["admin_labels"]["higher"]["singular"]: m["province"],
-            "Population": m["context"].get("population"),
-            "Area (km2)": m["context"].get("totalLandAreaKm2"),
-            "Infrastructure score": m["scores"].get("infrastructure_score"),
-            "Livability score": m["scores"].get("livability_score"),
-            "Prosperity score": m["scores"].get("prosperity_score"),
-        }
-        for m in rows
-    ])
+        df = pd.DataFrame([
+            {
+                country["admin_labels"]["lower"]["singular"]: m["municipality"],
+                country["admin_labels"]["higher"]["singular"]: m["province"],
+                "Population": m["context"].get("population"),
+                "Area (km2)": m["context"].get("totalLandAreaKm2"),
+                "Infrastructure score": m["scores"].get("infrastructure_score"),
+                "Livability score": m["scores"].get("livability_score"),
+                "Prosperity score": m["scores"].get("prosperity_score"),
+            }
+            for m in rows
+        ])
 
-    filename = f"{country['slug']}-sng-{utils.lower_first(country['admin_labels']['lower']['singular'])}-metrics.csv"
-    return dcc.send_data_frame(df.to_csv, filename, index=False)
+        filename = f"{country['slug']}-sng-{utils.lower_first(country['admin_labels']['lower']['singular'])}-metrics.csv"
+        return dcc.send_data_frame(df.to_csv, filename, index=False)
+    except Exception:
+        logger.exception("CSV export failed for country %s.", country_slug)
+        raise
 
 
 # ==========================================================================
@@ -1220,36 +1252,41 @@ def update_strategy_inventory(search, readiness, doctype, translation, theme_dat
     if not country_code:
         raise PreventUpdate
 
-    dataset = queries.get_strategy_inventory_dataset(country_code)
-    if not dataset:
-        raise PreventUpdate
+    logger.debug("Refreshing strategy inventory for %s.", country_code)
+    try:
+        dataset = queries.get_strategy_inventory_dataset(country_code)
+        if not dataset:
+            raise PreventUpdate
 
-    dark = (theme_data or {}).get("theme") == "dark"
-    all_records = dataset["records"]
-    summary = queries.get_strategy_inventory_summary(all_records, dataset["expected_lsg_count"], dataset.get("summary_override"))
+        dark = (theme_data or {}).get("theme") == "dark"
+        all_records = dataset["records"]
+        summary = queries.get_strategy_inventory_summary(all_records, dataset["expected_lsg_count"], dataset.get("summary_override"))
 
-    filtered = all_records
-    if search:
-        needle = search.strip().lower()
-        filtered = [r for r in filtered if needle in (r.get("lsg_name") or "").lower()]
-    if readiness and readiness != "all":
-        filtered = [r for r in filtered if queries.get_readiness_category(r) == readiness]
-    if doctype and doctype != "all":
-        filtered = [r for r in filtered if r.get("document_type") == doctype]
-    if translation and translation != "all":
-        filtered = [r for r in filtered if r.get("translation_status") == translation]
+        filtered = all_records
+        if search:
+            needle = search.strip().lower()
+            filtered = [r for r in filtered if needle in (r.get("lsg_name") or "").lower()]
+        if readiness and readiness != "all":
+            filtered = [r for r in filtered if queries.get_readiness_category(r) == readiness]
+        if doctype and doctype != "all":
+            filtered = [r for r in filtered if r.get("document_type") == doctype]
+        if translation and translation != "all":
+            filtered = [r for r in filtered if r.get("translation_status") == translation]
 
-    summary_cards = build_strategy_summary_cards(summary)
-    readiness_fig = utils.build_readiness_bar_chart(summary["status_breakdown"], dark=dark)
-    year_fig = utils.build_publication_year_chart(summary["publication_year_counts"], dark=dark)
-    table = build_strategy_table(filtered)
+        summary_cards = build_strategy_summary_cards(summary)
+        readiness_fig = utils.build_readiness_bar_chart(summary["status_breakdown"], dark=dark)
+        year_fig = utils.build_publication_year_chart(summary["publication_year_counts"], dark=dark)
+        table = build_strategy_table(filtered)
 
-    return (
-        summary_cards,
-        html.Div(className="content-card", children=[html.H3("Readiness breakdown"), utils.wrap_chart(readiness_fig, "strategy-readiness-graph")]),
-        html.Div(className="content-card", children=[html.H3("Documents by publication year"), utils.wrap_chart(year_fig, "strategy-year-graph")]),
-        table,
-    )
+        return (
+            summary_cards,
+            html.Div(className="content-card", children=[html.H3("Readiness breakdown"), utils.wrap_chart(readiness_fig, "strategy-readiness-graph")]),
+            html.Div(className="content-card", children=[html.H3("Documents by publication year"), utils.wrap_chart(year_fig, "strategy-year-graph")]),
+            table,
+        )
+    except Exception:
+        logger.exception("Strategy inventory refresh failed for %s.", country_code)
+        raise
 
 
 # --------------------------------------------------------------------------
@@ -1259,10 +1296,9 @@ def update_strategy_inventory(search, readiness, doctype, translation, theme_dat
 # --------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import os
-
     debug = os.environ.get("DASH_DEBUG", "true").lower() == "true"
     port = int(os.environ.get("PORT", "8050"))
+    logger.info("Starting Dash server with debug=%s on port %s.", debug, port)
     # `app.run` is the modern entrypoint (Dash 2.17+); `run_server` is kept
     # as a fallback for slightly older 2.x installs.
     run = getattr(app, "run", None) or app.run_server

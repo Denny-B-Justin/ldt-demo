@@ -14,7 +14,10 @@ Nothing in this module talks to a database or the filesystem - it is pure,
 static, importable data and design tokens.
 """
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # App-level metadata
@@ -1717,3 +1720,9 @@ AI_GENERATION_ENABLED = os.environ.get("AI_GENERATION_ENABLED", "false").lower()
 DEFAULT_MAP_METRIC_ID = "prosperity_score"
 DEFAULT_SCATTER_X_METRIC_ID = "infrastructure_score"
 DEFAULT_SCATTER_Y_METRIC_ID = "prosperity_score"
+
+logger.info(
+    "Loaded LDT constants for %s countries and %s readiness categories.",
+    len(COUNTRIES),
+    len(READINESS_CATEGORIES),
+)

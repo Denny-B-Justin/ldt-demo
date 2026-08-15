@@ -41,11 +41,14 @@ single Dash worker process only reads each JSON file once.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 import constants
+
+logger = logging.getLogger(__name__)
 
 try:
     from supabase import create_client, Client  # type: ignore
@@ -64,12 +67,17 @@ ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 def get_supabase_client() -> Optional["Client"]:
     """Return a cached Supabase client, or None if not configured."""
     if create_client is None:
+        logger.warning("Supabase client library is unavailable; falling back to bundled JSON data.")
         return None
     if not constants.SUPABASE_URL or not constants.SUPABASE_SERVICE_ROLE_KEY:
+        logger.info("Supabase credentials are not configured; using local JSON fallback.")
         return None
     try:
-        return create_client(constants.SUPABASE_URL, constants.SUPABASE_SERVICE_ROLE_KEY)
+        client = create_client(constants.SUPABASE_URL, constants.SUPABASE_SERVICE_ROLE_KEY)
+        logger.info("Supabase connection initialized successfully.")
+        return client
     except Exception:
+        logger.exception("Supabase initialization failed; falling back to bundled JSON data.")
         return None
 
 
@@ -86,8 +94,12 @@ def load_local_analytics_fallback(country_code: str) -> Dict[str, Any]:
     """Load the generated analytics-data.json fallback for a country."""
     country = constants.COUNTRY_BY_CODE.get(country_code, constants.DEFAULT_COUNTRY)
     file_path = os.path.join(ASSETS_DIR, country["fallback_data_path"])
-    with open(file_path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+    try:
+        with open(file_path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        logger.exception("Could not load analytics fallback for %s from %s.", country_code, file_path)
+        raise
 
 
 @lru_cache(maxsize=None)
@@ -95,8 +107,12 @@ def load_map_feature_collection(country_code: str) -> Dict[str, Any]:
     """Load the municipality boundary GeoJSON for a country."""
     country = constants.COUNTRY_BY_CODE.get(country_code, constants.DEFAULT_COUNTRY)
     file_path = os.path.join(ASSETS_DIR, country["map_data_path"])
-    with open(file_path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+    try:
+        with open(file_path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        logger.exception("Could not load map GeoJSON for %s from %s.", country_code, file_path)
+        raise
 
 
 @lru_cache(maxsize=None)
@@ -104,12 +120,18 @@ def load_strategy_inventory_fallback(country_code: str) -> Optional[Dict[str, An
     """Load the sample/fallback strategy inventory dataset for a country."""
     country = constants.COUNTRY_BY_CODE.get(country_code)
     if not country or not country.get("strategy_inventory_path"):
+        logger.info("No strategy inventory fallback defined for country %s.", country_code)
         return None
     file_path = os.path.join(ASSETS_DIR, country["strategy_inventory_path"])
     if not os.path.exists(file_path):
+        logger.warning("Strategy inventory fallback file missing for %s: %s", country_code, file_path)
         return None
-    with open(file_path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+    try:
+        with open(file_path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        logger.exception("Could not load strategy inventory fallback for %s from %s.", country_code, file_path)
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -166,8 +188,10 @@ def _try_supabase_table(table: str, builder=None, country_code: Optional[str] = 
         if builder is not None:
             query = builder(query)
         response = query.execute()
+        logger.debug("Loaded %s rows from Supabase table %s for country %s.", len(response.data), table, country_code)
         return response.data
     except Exception:
+        logger.exception("Supabase query failed for table %s (country=%s).", table, country_code)
         return None
 
 
@@ -189,14 +213,14 @@ def get_analytics_dataset(country_code: str) -> Dict[str, Any]:
     silently keeps the JSON fallback values, exactly like the original
     Next.js `queries.ts` fallback strategy.
     """
+    logger.debug("Loading analytics dataset for country %s.", country_code)
     dataset = load_local_analytics_fallback(country_code)
 
     if supabase_available():
         try:
             _overlay_supabase_scores(country_code, dataset)
         except Exception:
-            # Any Supabase failure gracefully keeps the bundled JSON values.
-            pass
+            logger.exception("Supabase overlay failed for analytics dataset %s; keeping bundled JSON values.", country_code)
 
     return dataset
 
@@ -244,6 +268,7 @@ def _overlay_supabase_scores(country_code: str, dataset: Dict[str, Any]) -> None
         live_scores = scores_by_municipality.get(supa_row["id"])
         if live_scores:
             record["scores"].update(live_scores)
+            logger.debug("Updated live scores for %s municipality in %s.", record.get("municipality"), country_code)
 
 
 def get_years(country_code: str) -> List[int]:
