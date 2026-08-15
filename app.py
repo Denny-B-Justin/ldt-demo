@@ -49,7 +49,8 @@ import utils
 if not logging.getLogger().handlers:
     logging.basicConfig(
         level=os.environ.get("LDT_LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%H:%M:%S",
     )
 
 logger = logging.getLogger(__name__)
