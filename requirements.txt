@@ -1,0 +1,11 @@
+# Local Development Tracker (Dash) - requirements
+# Tested against Python 3.9 - 3.12. Pin versions loosely so Posit Connect's
+# package manager can resolve a compatible build for its Python environment.
+
+dash
+plotly
+pandas
+numpy
+gunicorn
+python-dotenv
+supabase
