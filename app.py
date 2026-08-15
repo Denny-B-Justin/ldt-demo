@@ -75,6 +75,27 @@ logger.info("Initialized Dash app with %s country workspaces.", len(constants.CO
 # --------------------------------------------------------------------------
 # App shell (root layout) - equivalent of src/app/layout.tsx
 # --------------------------------------------------------------------------
+FAVICON_URL = app.get_asset_url("favicon.ico")
+
+app.index_string = """
+<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        <link rel="icon" type="image/x-icon" href=\"""" + FAVICON_URL + """\">
+        {%css%}
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>
+"""
 
 app.layout = html.Div(
     id="ldt-app-root",
@@ -135,7 +156,7 @@ def render_home() -> html.Main:
                             className="filters-card",
                             style={"maxWidth": "48rem"},
                             children=[
-                                html.Label("Select a country workspace", htmlFor="home-country-select", className="visually-hidden"),
+                                html.Label("", htmlFor="home-country-select", className="visually-hidden"),
                                 html.Div(
                                     className="filters-grid",
                                     style={"gridTemplateColumns": "1fr auto"},
