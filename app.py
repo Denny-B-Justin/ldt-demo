@@ -36,6 +36,7 @@ import logging
 import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs
 
 import dash
 import pandas as pd
@@ -58,12 +59,24 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------
 # App instantiation
 # --------------------------------------------------------------------------
+#
+# The app is deployed behind a reverse proxy at
+# https://datanalytics.worldbank.org/apps/bysvuybuy/ . Dash needs to know
+# that prefix so it emits correct URLs for its own internal assets
+# (_dash-layout, _dash-update-component, /assets/*, etc). Everything else
+# (in-app navigation) is done with *relative* "?page=..." links, which work
+# unchanged under any deployment prefix, so it does not need to be baked
+# into every href.
+#
+# Override via env var if the app is ever mounted somewhere else.
+APP_PATHNAME_PREFIX = os.environ.get("DASH_PATHNAME_PREFIX", "/apps/bysvuybuy/")
 
 app = dash.Dash(
     __name__,
     title=constants.APP_TITLE,
     update_title=None,
     suppress_callback_exceptions=True,
+    requests_pathname_prefix=APP_PATHNAME_PREFIX,
     meta_tags=[
         {"name": "viewport", "content": "width=device-width, initial-scale=1"},
         {"name": "description", "content": constants.APP_DESCRIPTION},
@@ -192,7 +205,7 @@ def render_home() -> html.Main:
                         ),
                         html.Div(
                             style={"marginTop": "1.5rem", "borderRadius": "1.25rem", "border": "1px solid var(--border-soft)", "background": "#fff", "padding": "1rem"},
-                            children=html.Img(src="/assets/PIL_Diagram_v2.png", style={"width": "100%", "height": "auto", "borderRadius": "1rem"}),
+                            children=html.Img(src=app.get_asset_url("PIL_Diagram_v2.png"), style={"width": "100%", "height": "auto", "borderRadius": "1rem"}),
                         ),
                     ],
                 ),
@@ -432,7 +445,7 @@ def render_methodology() -> html.Main:
                 ),
                 html.Div(
                     style={"marginTop": "1.5rem", "borderRadius": "1.25rem", "border": "1px solid var(--border-soft)", "background": "#fff", "padding": "1rem"},
-                    children=html.Img(src="/assets/PIL_Diagram_v2.png", style={"width": "100%", "height": "auto", "borderRadius": "1rem"}),
+                    children=html.Img(src=app.get_asset_url("PIL_Diagram_v2.png"), style={"width": "100%", "height": "auto", "borderRadius": "1rem"}),
                 ),
             ]),
             utils.section_card("Indicator Selection Logic", [
@@ -823,7 +836,7 @@ def render_not_found() -> html.Main:
     return html.Main(className="page-container", children=[
         html.H1("Page not found"),
         html.P("The page you're looking for doesn't exist. Return to the ", style={"display": "inline"}),
-        html.A("homepage", href="/"),
+        html.A("homepage", href="?page=home"),
         html.Span("."),
     ])
 
@@ -832,7 +845,7 @@ def render_under_construction(country_name: str) -> html.Main:
     return html.Main(className="page-container", children=[
         html.H1(f"{country_name} workspace"),
         html.P("This country workspace is not yet live. Check back soon, or return to the homepage."),
-        html.A("\u2190 Back to homepage", href="/", className="ldt-action-button secondary"),
+        html.A("\u2190 Back to homepage", href="?page=home", className="ldt-action-button secondary"),
     ])
 
 
@@ -1056,32 +1069,53 @@ def build_strategy_table(records: List[Dict[str, Any]], limit: int = 50) -> html
 # ==========================================================================
 
 STATIC_ROUTES = {
-    "/": render_home,
-    "/about": render_about,
-    "/methodology": render_methodology,
-    "/roadmap": render_roadmap,
-    "/resources": render_resources,
-    "/release-notes": render_release_notes,
+    "home": render_home,
+    "about": render_about,
+    "methodology": render_methodology,
+    "roadmap": render_roadmap,
+    "resources": render_resources,
+    "release-notes": render_release_notes,
 }
 
 
-def build_route_content(pathname: str) -> html.Main:
-    pathname = (pathname or "/").rstrip("/") or "/"
-    logger.debug("Resolving route: %s", pathname)
+def parse_page_query(search: str) -> Dict[str, str]:
+    """Parses a ``?page=nepal&view=analytics``-style query string.
 
-    if pathname in STATIC_ROUTES:
-        return STATIC_ROUTES[pathname]()
+    Every route in the app is addressed through query parameters instead of
+    path segments, e.g.:
 
-    parts = [p for p in pathname.split("/") if p]
+        /?page=home
+        /?page=about
+        /?page=nepal
+        /?page=nepal&view=analytics
+        /?page=nepal&view=strategy-inventory
 
-    if len(parts) == 1 and parts[0] in constants.COUNTRY_BY_SLUG:
-        return render_country_landing(parts[0])
+    This keeps every internal link a plain relative ``?page=...`` href, so
+    the app can be mounted at any base path (e.g. behind a reverse proxy at
+    ``/apps/bysvuybuy/``) with no link rewriting required.
+    """
+    search = search or ""
+    qs = parse_qs(search.lstrip("?"))
+    page = (qs.get("page", ["home"])[0] or "home").strip()
+    view = (qs.get("view", [""])[0] or "").strip()
+    return {"page": page, "view": view}
 
-    if len(parts) == 2 and parts[0] in constants.COUNTRY_BY_SLUG and parts[1] == "analytics":
-        return render_analytics(parts[0])
 
-    if len(parts) == 2 and parts[0] in constants.COUNTRY_BY_SLUG and parts[1] == "strategy-inventory":
-        return render_strategy_inventory(parts[0])
+def build_route_content(search: str) -> html.Main:
+    route = parse_page_query(search)
+    page, view = route["page"], route["view"]
+    logger.debug("Resolving route: page=%s view=%s", page, view)
+
+    if not view and page in STATIC_ROUTES:
+        return STATIC_ROUTES[page]()
+
+    if page in constants.COUNTRY_BY_SLUG:
+        if view == "analytics":
+            return render_analytics(page)
+        if view == "strategy-inventory":
+            return render_strategy_inventory(page)
+        if not view:
+            return render_country_landing(page)
 
     return render_not_found()
 
@@ -1090,15 +1124,16 @@ def build_route_content(pathname: str) -> html.Main:
     Output("ldt-page-content", "children"),
     Output("ldt-header-slot", "children"),
     Output("ldt-footer-slot", "children"),
-    Input("url", "pathname"),
+    Input("url", "search"),
 )
-def render_page_content(pathname):
-    logger.debug("Rendering page shell for path %s", pathname)
+def render_page_content(search):
+    logger.debug("Rendering page shell for query %s", search)
     try:
-        content = build_route_content(pathname)
-        return content, utils.app_header(pathname or "/"), utils.app_footer()
+        content = build_route_content(search)
+        current_page = parse_page_query(search)["page"]
+        return content, utils.app_header(current_page), utils.app_footer()
     except Exception:
-        logger.exception("Failed while rendering page content for %s.", pathname)
+        logger.exception("Failed while rendering page content for %s.", search)
         raise
 
 
@@ -1154,10 +1189,10 @@ app.clientside_callback(
     """
     function(n_clicks, slug) {
         if (!n_clicks || !slug) { return window.dash_clientside.no_update; }
-        return '/' + slug;
+        return '?page=' + slug;
     }
     """,
-    Output("url", "pathname"),
+    Output("url", "search"),
     Input("home-country-open", "n_clicks"),
     State("home-country-select", "value"),
     prevent_initial_call=True,

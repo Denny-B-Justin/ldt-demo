@@ -56,7 +56,7 @@ COLORS_LIGHT = {
     "chart_axis": "rgba(55, 66, 145, 0.34)",
     "chart_tick": "#3675b7",
     "chart_text": "#374291",
-    "chart_muted_series": "rgba(55, 66, 145, 0.62)",
+    "chart_muted_series": "#f4a261",
     "map_min": "#e5ebf8",
     "map_max": "#3675b7",
     "map_no_data": "#e7e7e7",
