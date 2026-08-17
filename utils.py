@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, urlparse
 
+import dash
 import plotly.graph_objects as go
 from dash import dcc, html
 
@@ -47,23 +49,38 @@ def fmt(value: Optional[float], digits: int = 2) -> str:
 # Layout / chrome components (src/components/layout/*)
 # --------------------------------------------------------------------------
 
-def is_active_path(pathname: str, href: str, exact: bool = False) -> bool:
+def page_param(href: str) -> str:
+    """Extracts the ``page`` query-param value from a ``?page=...`` href.
+
+    All internal navigation is done through query-string routing
+    (``?page=nepal``, ``?page=nepal&view=analytics``, ...) rather than path
+    segments, so "which nav item is active" is decided by comparing the
+    ``page`` param, not the URL path.
+    """
+    query = urlparse(href).query
+    return parse_qs(query).get("page", [""])[0]
+
+
+def is_active_page(current_page: str, href: str, exact: bool = False) -> bool:
     if "#" in href:
         return False
+    target = page_param(href)
+    if not target:
+        return False
     if exact:
-        return pathname == href
-    return pathname.startswith(href) and href != "/"
+        return current_page == target
+    return current_page == target or current_page.startswith(target + "-")
 
 
-def nav_link(item: Dict[str, Any], pathname: str, class_prefix: str = "chrome-nav-link") -> html.A:
-    active = is_active_path(pathname, item["href"], item.get("exact", False))
+def nav_link(item: Dict[str, Any], current_page: str, class_prefix: str = "chrome-nav-link") -> html.A:
+    active = is_active_page(current_page, item["href"], item.get("exact", False))
     classes = class_prefix + (" active" if active else "")
     return html.A(item["label"], href=item["href"], className=classes)
 
 
-def app_header(pathname: str = "/") -> html.Header:
+def app_header(current_page: str = "home") -> html.Header:
     """Port of src/components/layout/app-header.tsx"""
-    nav_links = [nav_link(item, pathname) for item in constants.HEADER_NAV_ITEMS]
+    nav_links = [nav_link(item, current_page) for item in constants.HEADER_NAV_ITEMS]
 
     return html.Header(
         className="ldt-header",
@@ -72,9 +89,9 @@ def app_header(pathname: str = "/") -> html.Header:
                 className="ldt-header-inner",
                 children=[
                     html.A(
-                        href="/",
+                        href="?page=home",
                         className="ldt-header-logo",
-                        children=html.Img(src="/assets/ldt-logo-dark.png", alt="Local Development Tracker"),
+                        children=html.Img(src=dash.get_asset_url("ldt-logo-dark.png"), alt="Local Development Tracker"),
                     ),
                     html.Nav(className="ldt-header-nav", children=nav_links),
                     html.Div(
@@ -124,8 +141,8 @@ def app_footer() -> html.Footer:
                     className="ldt-footer-brand",
                     children=[
                         html.A(
-                            href="/",
-                            children=html.Img(src="/assets/ldt-logo-dark.png", alt="Local Development Tracker", className="ldt-footer-logo"),
+                            href="?page=home",
+                            children=html.Img(src=dash.get_asset_url("ldt-logo-dark.png"), alt="Local Development Tracker", className="ldt-footer-logo"),
                         ),
                         html.P(
                             "Municipality-level analytics for comparing local development "
@@ -175,13 +192,13 @@ def ecosystem_logo_grid() -> html.Div:
         className="ldt-ecosystem-grid",
         children=[
             html.A(
-                html.Img(src="/assets/gpb-logo.png", alt="GPB Tools"),
+                html.Img(src=dash.get_asset_url("gpb-logo.png"), alt="GPB Tools"),
                 href="https://pim-pam.net/web-applications/#gpbp",
                 target="_blank",
                 className="ldt-ecosystem-tile",
             ),
             html.A(
-                html.Img(src="/assets/pimpam_logo.png", alt="PIM PAM"),
+                html.Img(src=dash.get_asset_url("pimpam_logo.png"), alt="PIM PAM"),
                 href="https://pim-pam.net/",
                 target="_blank",
                 className="ldt-ecosystem-tile",
@@ -219,7 +236,7 @@ def figure_card(src: str, alt: str, caption: str) -> html.Figure:
     return html.Figure(
         className="figure-card",
         children=[
-            html.Img(src=f"/assets/{src}", alt=alt),
+            html.Img(src=dash.get_asset_url(src), alt=alt),
             html.Figcaption(caption),
         ],
     )
