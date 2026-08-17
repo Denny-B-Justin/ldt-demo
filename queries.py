@@ -695,7 +695,7 @@ def get_country_landing_actions(country: Dict[str, Any]) -> List[Dict[str, str]]
     actions = [
         {
             "label": f"Analyze {lower_unit_label} metrics",
-            "href": f"/{country['slug']}/analytics",
+            "href": f"?page={country['slug']}&view=analytics",
             "variant": "primary",
             "align": "left",
         }
@@ -704,14 +704,14 @@ def get_country_landing_actions(country: Dict[str, Any]) -> List[Dict[str, str]]
     if country["slug"] in constants.STRATEGY_INVENTORY_SLUGS:
         actions.append({
             "label": "Strategy inventory",
-            "href": f"/{country['slug']}/strategy-inventory",
+            "href": f"?page={country['slug']}&view=strategy-inventory",
             "variant": "secondary",
             "align": "left",
         })
 
     actions.append({
         "label": "Return to Homepage",
-        "href": "/",
+        "href": "?page=home",
         "variant": "secondary",
         "align": "right",
     })

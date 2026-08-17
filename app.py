@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------
 #
 # The app is deployed behind a reverse proxy at
-# https://datanalytics.worldbank.org/apps/bysvuybuy/ . Dash needs to know
+# Dash needs to know
 # that prefix so it emits correct URLs for its own internal assets
 # (_dash-layout, _dash-update-component, /assets/*, etc). Everything else
 # (in-app navigation) is done with *relative* "?page=..." links, which work
@@ -69,14 +69,12 @@ logger = logging.getLogger(__name__)
 # into every href.
 #
 # Override via env var if the app is ever mounted somewhere else.
-APP_PATHNAME_PREFIX = os.environ.get("DASH_PATHNAME_PREFIX", "/apps/bysvuybuy/")
 
 app = dash.Dash(
     __name__,
     title=constants.APP_TITLE,
     update_title=None,
     suppress_callback_exceptions=True,
-    requests_pathname_prefix=APP_PATHNAME_PREFIX,
     meta_tags=[
         {"name": "viewport", "content": "width=device-width, initial-scale=1"},
         {"name": "description", "content": constants.APP_DESCRIPTION},
@@ -900,8 +898,11 @@ def render_analytics(slug: str) -> html.Main:
                     ]),
                     html.Div(className="filter-field", children=[
                         html.Label(admin["lower"]["singular"]),
-                        dcc.Dropdown(id="analytics-municipality", options=page_data["filters"]["municipalities"], value=page_data["selected"]["municipalityId"], clearable=False,
-                                     optionHeight=50),
+                        dcc.Dropdown(id="analytics-municipality",
+                            options=[{"label": m["label"], "value": m["id"]} for m in page_data["filters"]["municipalities"]],
+                            value=page_data["selected"]["municipalityId"],
+                            clearable=False,
+                            optionHeight=50,),
                     ]),
                     html.Div(className="filter-field", children=[
                         html.Label("Map / X-axis metric"),
@@ -1092,7 +1093,7 @@ def parse_page_query(search: str) -> Dict[str, str]:
 
     This keeps every internal link a plain relative ``?page=...`` href, so
     the app can be mounted at any base path (e.g. behind a reverse proxy at
-    ``/apps/bysvuybuy/``) with no link rewriting required.
+    ``) with no link rewriting required.
     """
     search = search or ""
     qs = parse_qs(search.lstrip("?"))
@@ -1217,9 +1218,9 @@ def update_municipality_options(year, province, country_code, current_municipali
         raise PreventUpdate
     logger.debug("Updating municipality options for %s year=%s province=%s", country_code, year, province)
     try:
-        options = queries.get_municipality_options(country_code, year, province)
-        ids = {o["id"] for o in options}
-        value = current_municipality_id if current_municipality_id in ids else (options[0]["id"] if options else None)
+        options = [{"label": o["label"], "value": o["id"]} for o in queries.get_municipality_options(country_code, year, province)]
+        ids = {o["value"] for o in options}
+        value = current_municipality_id if current_municipality_id in ids else (options[0]["value"] if options else None)
         return options, value
     except Exception:
         logger.exception("Municipality dropdown update failed for %s %s %s.", country_code, year, province)

@@ -103,28 +103,28 @@ GPB_CHROME_BG = "#021420"
 # --------------------------------------------------------------------------
 
 HEADER_NAV_ITEMS = [
-    {"href": "/", "label": "Home", "exact": True},
-    {"href": "/about", "label": "About", "exact": False},
-    {"href": "/methodology", "label": "Methodology", "exact": False},
-    {"href": "/roadmap", "label": "Roadmap", "exact": False},
-    {"href": "/resources", "label": "Resources", "exact": False},
-    {"href": "/release-notes", "label": "Release Notes", "exact": False},
+    {"href": "?page=home", "label": "Home", "exact": True},
+    {"href": "?page=about", "label": "About", "exact": False},
+    {"href": "?page=methodology", "label": "Methodology", "exact": False},
+    {"href": "?page=roadmap", "label": "Roadmap", "exact": False},
+    {"href": "?page=resources", "label": "Resources", "exact": False},
+    {"href": "?page=release-notes", "label": "Release Notes", "exact": False},
 ]
 
 FOOTER_NAV_ITEMS = [
-    {"href": "/", "label": "Home"},
-    {"href": "/#country-workspaces", "label": "Country workspaces"},
-    {"href": "/resources", "label": "Resources"},
-    {"href": "/methodology", "label": "Methodology"},
-    {"href": "/roadmap", "label": "Roadmap"},
-    {"href": "/release-notes", "label": "Release Notes"},
-    {"href": "/about", "label": "About"},
+    {"href": "?page=home", "label": "Home"},
+    {"href": "?page=home#country-workspaces", "label": "Country workspaces"},
+    {"href": "?page=resources", "label": "Resources"},
+    {"href": "?page=methodology", "label": "Methodology"},
+    {"href": "?page=roadmap", "label": "Roadmap"},
+    {"href": "?page=release-notes", "label": "Release Notes"},
+    {"href": "?page=about", "label": "About"},
 ]
 
 COUNTRY_WORKSPACE_LINKS = [
-    {"href": "/nepal", "label": "Nepal"},
-    {"href": "/serbia", "label": "Serbia"},
-    {"href": "/zambia", "label": "Zambia"},
+    {"href": "?page=nepal", "label": "Nepal"},
+    {"href": "?page=serbia", "label": "Serbia"},
+    {"href": "?page=zambia", "label": "Zambia"},
 ]
 
 # --------------------------------------------------------------------------
