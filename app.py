@@ -1321,7 +1321,6 @@ if __name__ == "__main__":
     debug = os.environ.get("DASH_DEBUG", "true").lower() == "true"
     port = int(os.environ.get("PORT", "8050"))
     logger.info("Starting Dash server with debug=%s on port %s.", debug, port)
-    # `app.run` is the modern entrypoint (Dash 2.17+); `run_server` is kept
-    # as a fallback for slightly older 2.x installs.
+
     run = getattr(app, "run", None) or app.run_server
-    run(debug=debug, host="0.0.0.0", port=port)
+    run(debug=debug, host="127.0.0.1", port=port)
