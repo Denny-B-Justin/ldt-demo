@@ -839,6 +839,19 @@ def render_not_found() -> html.Main:
     ])
 
 
+def render_error(detail: str = "") -> html.Main:
+    """Shown when a Databricks read fails, instead of a bare 500."""
+    return html.Main(className="page-container", children=[
+        html.H1("Data temporarily unavailable"),
+        html.P(
+            "The Local Development Tracker could not load data from Databricks "
+            "Unity Catalog. This usually clears on its own - try again shortly."
+        ),
+        html.P(detail, className="small muted") if detail else None,
+        html.A("← Back to homepage", href="?page=home", className="ldt-action-button secondary"),
+    ])
+
+
 def render_under_construction(country_name: str) -> html.Main:
     return html.Main(className="page-container", children=[
         html.H1(f"{country_name} workspace"),
@@ -1129,13 +1142,13 @@ def build_route_content(search: str) -> html.Main:
 )
 def render_page_content(search):
     logger.debug("Rendering page shell for query %s", search)
+    current_page = parse_page_query(search)["page"]
     try:
         content = build_route_content(search)
-        current_page = parse_page_query(search)["page"]
-        return content, utils.app_header(current_page), utils.app_footer()
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
         logger.exception("Failed while rendering page content for %s.", search)
-        raise
+        content = render_error(str(exc))
+    return content, utils.app_header(current_page), utils.app_footer()
 
 
 # ==========================================================================
@@ -1244,9 +1257,13 @@ def update_analytics_tab(tab, year, province, municipality_id, metric_id, theme_
     logger.debug("Updating analytics tab %s for %s (year=%s, province=%s, municipality=%s)", tab, country_code, year, province, municipality_id)
     try:
         return render_analytics_tab_content(country_code, tab, year, province, municipality_id, metric_id, dark)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
         logger.exception("Analytics tab render failed for country=%s tab=%s.", country_code, tab)
-        raise
+        return html.Section(className="section-card", children=[
+            html.H2("Data temporarily unavailable"),
+            html.P("Could not load analytics data from Databricks. Try again shortly."),
+            html.P(str(exc), className="small muted"),
+        ])
 
 
 @app.callback(

@@ -7,8 +7,9 @@ reading score drivers, tracking local planning-strategy documents, and
 connecting evidence to public investment decisions across Nepal, Serbia,
 and Zambia.
 
-This app is a from-scratch migration of an existing Next.js/React/Supabase
-application to Dash, built to be hosted on **Posit Connect**.
+This app is a from-scratch migration of an existing Next.js/React
+application to Dash, built to be hosted on **Posit Connect**. Its data
+layer reads live from Databricks Unity Catalog (see section 3).
 
 ---
 
@@ -19,12 +20,13 @@ application to Dash, built to be hosted on **Posit Connect**.
 | `app.py` | Main Dash application: page layouts for every route, the router, and every callback (theme, navigation, analytics filters, strategy-inventory filters, CSV export). |
 | `utils.py` | Toolkit of reusable pieces: Plotly figure builders (choropleth map, 2D/3D scatter, waterfall, bar charts) and reusable Dash UI components (header, footer, cards, badges, buttons). |
 | `constants.py` | All static content and configuration: navigation, design tokens/colors, country metadata, and the full text content of the About, Methodology, Roadmap, Resources, and Release Notes pages. |
-| `queries.py` | The data-access layer: Supabase reads (when configured) with a transparent fallback to bundled JSON snapshots, plus every pure data-shaping function (score averages, province summaries, waterfall/driver calculations, strategy-inventory readiness logic). |
+| `queries.py` | The data-access layer: `QueryService` (cached Databricks SQL executor), the Unity Catalog -> `analytics-data.json`-shape assembler, boundary geometry decode, the documents-Volume strategy inventory, plus every pure data-shaping function (score averages, province summaries, waterfall/driver calculations, strategy-inventory readiness logic). |
 | `assets/styles.css` | The full design system (CSS custom properties for light/dark themes) plus hand-written component classes that reproduce the original Tailwind-based UI (Dash has no Tailwind build step, so this is a plain CSS port). Dash auto-loads everything in `assets/`. |
 | `assets/*.png`, `assets/*.webp` | Logos and figures used across the site (header/footer logos, About/Methodology page figures, partner logos). Referenced from Python with `/assets/<file>` (Dash's `get_asset_url` convention). |
 | `assets/data/<country>/*.json`, `*.geojson` | Bundled analytics snapshots and municipality boundary files per country - the offline fallback data source (see Section 3). |
 | `README.md` | This file. |
-| `.example.env` | Template for environment variables; copy to `.env` for local dev. |
+| `.env.sample` | Template for environment variables; copy to `.env` for local dev. |
+| `scripts/introspect_databricks.py` | One-shot Unity Catalog / Volume schema dump used to verify/adjust the per-country column config. |
 | `requirements.txt` | Python dependencies (Python 3.9-compatible pins). |
 
 ---
@@ -105,65 +107,63 @@ required.
 
 ## 3. Data sources and the database
 
-The app follows the **same fallback strategy** as the original Next.js
-app: try Supabase first, fall back to bundled JSON if Supabase isn't
-configured or a query fails. This means **the app works out of the box
-with zero configuration** - which matters for a first Posit Connect
-deployment before a database connection is provisioned.
+The app reads **every dataset live from Databricks Unity Catalog** (schema
+`prd_mega.sgpbpi163`) through an OAuth service principal. There is **no
+bundled-data fallback**: if the four `DATABRICKS_*` environment variables
+are not set, `queries.py` raises `EnvironmentError` at import and the app
+does not start.
 
-### 3.1 Primary source: Supabase (`analytics` schema)
+### 3.1 Unity Catalog tables
 
-When `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set
-(see `.example.env`), `queries.py` opens a `supabase-py` client and reads
-from the same tables the original app used:
+Per country (`NPL` / `SRB` / `ZMB`):
 
 | Table | Purpose |
 |---|---|
-| `analytics.dataset_releases` | One row per country/year release (`is_active` flags the current release). |
-| `analytics.municipalities` | The registry of local-government units (id, composite key, province/district, country code). |
-| `analytics.score_definitions` | Pillar-level score metadata (Prosperity/Infrastructure/Livability), including which component indicators roll up into each. |
-| `analytics.score_components` | The individual component indicators that make up each score. |
-| `analytics.indicators` / `analytics.indicator_sources` | Indicator metadata and source/provenance notes shown in the metadata panel. |
-| `analytics.municipality_score_values` | The actual 0-100 score values per municipality/release/year. |
-| `analytics.municipality_indicator_values` | Raw/processed indicator values per municipality. |
-| `analytics.municipality_score_component_values` | Component-level values used for the score-driver waterfall charts. |
-| `analytics.municipality_context_values` | Contextual attributes (population, land area, etc.). |
-| `analytics.municipality_boundaries` | Boundary/geometry references. |
-| `analytics.strategy_inventory_documents` | The strategy/budget document registry for Serbia and Zambia (source status, parsing status, AI-readiness, translation status). |
+| `GPBP_LDT_<ISO3>_admin_2` | Indicator panel - one row per admin-2 unit per year, with the raw indicator columns and context columns (`Population`, `Total Land Area (km2)`, road/rail lengths and risk-km). |
+| `GPBP_LDT_<ISO3>_scores_admin_2` | 0-100 percentile score panel - one row per admin-2 unit per year, with component score columns and the three pillar scores (`Infrastructure Score`, `Livability Score`, `Prosperity Score`). |
+| `ldt_boundaries_admin2_<country>` | Admin-2 geometry for the choropleth (WKT / WKB / GeoJSON - auto-detected). `admin0` / `admin1` boundary tables exist but are not used yet. |
 
-`queries.get_analytics_dataset()` loads the bundled JSON as the base
-dataset (it already contains fully joined/derived scores, since it was
-produced by the same upstream pipeline that feeds Supabase) and, if
-Supabase is reachable, overlays the *live* score values for the active
-release on top of it. Any Supabase error is caught and silently ignored,
-leaving the JSON values in place - the app never hard-fails because of a
-database outage.
+The Strategy Inventory page (Serbia / Zambia) is built by listing the
+planning-documents Volume at `LDT_DOCUMENTS_VOLUME` (default
+`/Volumes/prd_mega/sgpbpi163/vgpbpi163/LDT/Local Development Plans`) via the
+Databricks SDK Files API and deriving one record per document file.
 
-### 3.2 Fallback source: bundled JSON snapshots
+Static indicator metadata (labels, descriptions, direction, pillar,
+sources - identical across all three countries) ships in
+`assets/data/indicator_definitions.json` rather than a table.
 
-`assets/data/<country>/`:
+### 3.2 How the dataset is assembled
 
-- `analytics-data.json` - a generated snapshot containing, per country:
-  the release metadata (`release.key`, `release.year`), the list of
-  `years` available, `provinces`, `metrics` (score + indicator
-  definitions with labels/units), `scoreDefinitions` (pillar -> component
-  mapping), `indicatorDefinitions`, `coverage` counts, and the full
-  `municipalities` array (one row per municipality per year, with nested
-  `scores`, `indicators`, `scoreComponents`, and `context` objects).
-- `municipalities.geojson` - the boundary `FeatureCollection` used to draw
-  the choropleth map, keyed by the same `compositeKey` used in
-  `analytics-data.json`.
-- `strategy_inventory.sample.json` (Serbia and Zambia only) - a sample/
-  preview strategy-document inventory in the same shape as the
-  `strategy_inventory_documents` Supabase table, used when no database is
-  configured. The app labels this data as a **sample/preview dataset** in
-  the UI (`is_sample_data: true`) so it is never mistaken for validated
-  source data.
+`queries.py` mirrors, function for function,
+`wb-ldt-app/scripts/lib/nepal-data.mjs` - the Node script that generated
+the JSON snapshots the app used before this migration - but reads
+DataFrames from `QueryService.execute_query()` instead of CSV files:
 
-These snapshots are the same generated files the original Next.js app
-bundled (`src/generated/*.json`, `public/data/*.geojson`) - they were not
-recreated from scratch, just relocated into `assets/data/` per this
-migration's requirement that all static data ship inside `assets/`.
+- `QueryService` is a thread-safe singleton with an in-memory TTL cache
+  (`QUERY_CACHE_TTL_SECONDS`, default 300s).
+- `get_analytics_dataset(code)` queries the admin + scores tables, maps the
+  raw columns to canonical metric ids (`constants.ADMIN_CANONICAL_MAPPINGS`
+  / `SCORE_CANONICAL_MAPPINGS`), joins scores to admin rows on
+  `Year::Province::District::Municipality`, and returns the same dict shape
+  the old `analytics-data.json` had - so every downstream pure function is
+  unchanged.
+- `load_map_feature_collection(code)` queries the boundary table, decodes
+  and simplifies each geometry with `shapely`, merges multi-row geometries
+  per unit, and emits a GeoJSON `FeatureCollection` keyed by `compositeKey`.
+
+Column names are resolved **tolerantly** (case- and punctuation-insensitive)
+against `constants.COUNTRY_DATA_SOURCES`, and every fetch is logged, e.g.:
+
+```
+INFO | queries | Assembling ZMB analytics dataset from prd_mega.sgpbpi163 (GPBP_LDT_ZMB_admin_2 + GPBP_LDT_ZMB_scores_admin_2)
+INFO | queries | Databricks query returned 580 rows x 34 cols in 1.21s: SELECT * FROM `prd_mega`.`sgpbpi163`.`GPBP_LDT_ZMB_admin_2`
+INFO | queries | ZMB boundary columns resolved: municipality=NAM_2 district=NAM_1 province=NAM_1 geometry=geometry_wkt
+```
+
+If a column cannot be resolved by the tolerant match, run
+`python scripts/introspect_databricks.py` (dumps `DESCRIBE` + sample rows
+for all 15 tables and walks the Volume) and correct the exact names in the
+relevant `constants.COUNTRY_DATA_SOURCES` block.
 
 ### 3.3 Where each page's data comes from
 
@@ -171,39 +171,28 @@ migration's requirement that all static data ship inside `assets/`.
 |---|---|
 | Home | `queries.get_analytics_dataset()` per country, aggregated into global coverage stats. |
 | About, Methodology, Roadmap, Resources, Release Notes | 100% static content from `constants.py` - no database calls. |
-| Country landing page | `queries.load_country_dataset()` + `queries.build_country_home_model()` (population/area totals, province groupings) + `queries.get_country_landing_actions()` / `get_plan_availability_disclosure()`. |
-| Country analytics page | `queries.get_analytics_page_data()` - the single function that assembles filters, the selected municipality, map features, scatter points, score-driver rows, and waterfall groups for the current filter selection. |
-| Strategy inventory page | `queries.get_strategy_inventory_dataset()` (Supabase table or sample JSON) + `queries.get_strategy_inventory_summary()` / `get_readiness_category()` for the coverage math and readiness classification. |
+| Country landing page | `queries.load_country_dataset()` + `queries.build_country_home_model()` + `queries.get_country_landing_actions()` / `get_plan_availability_disclosure()`. |
+| Country analytics page | `queries.get_analytics_page_data()` - assembles filters, selected municipality, map features, scatter points, score-driver rows, and waterfall groups. |
+| Strategy inventory page | `queries.get_strategy_inventory_dataset()` (documents Volume listing) + `queries.get_strategy_inventory_summary()` / `get_readiness_category()`. |
 
-### 3.4 What was intentionally simplified
+### 3.4 Tests and offline development
 
-Two things from the original product were deliberately **not** ported
-1:1, to keep this migration scoped to the 8 requested files and to
-Dash's request/response (not streaming) execution model:
+`pytest` (`pip install -r requirements-dev.txt`) runs fully offline - the
+suite monkeypatches `queries.execute_query` with synthetic DataFrames whose
+column names match the source CSVs, so the assembler's expected output is
+known exactly. The bundled `assets/data/<country>/*.json` snapshots are kept
+only as a reference for those fixtures; nothing reads them at runtime.
 
-1. **The multi-stage AI Planning Brief pipeline.** The original app ran a
-   7-stage LLM workflow (indicator narrative -> local plan context ->
-   national plan context -> web search context -> plan alignment -> SWOT
-   -> investment recommendations) with per-stage caching in Supabase and
-   PDF parsing of source planning documents. This migration wires the
-   relevant environment variables (`OPENAI_API_KEY`, `OPENAI_MODEL`,
-   `EXA_API_KEY`, `AI_GENERATION_ENABLED`, etc. - see `.example.env`) and
-   documents where they belong in `constants.py`, but does not
-   reimplement the pipeline itself in `app.py`. Wiring it up is a natural
-   next step and would live in `queries.py` (an `ai.py` module, in the
-   original) as additional functions called from a new "AI Brief" tab.
-2. **Live plan-document availability per municipality.** The original app
-   tracked, per municipality/province, whether a local or SNG planning
-   document link was on file (used for the "Development plan source
-   availability" disclosure on each country page). Because that specific
-   join table wasn't part of the `analytics` schema exported above, the
-   Dash version renders the same disclosure UI and groups municipalities
-   by province, but does not yet mark individual availability - see the
-   `build_plan_availability_groups()` docstring in `app.py`.
+### 3.5 What was intentionally simplified
 
-Everything else - every page, every chart type, every filter, every piece
-of static content, the full design system, dark mode, and the CSV export
-- is fully implemented and interactive.
+1. **The multi-stage AI Planning Brief pipeline** is not reimplemented.
+2. **Per-municipality plan availability** - the country-page "plan source
+   availability" disclosure groups units by province but does not yet mark
+   individual availability from the Volume listing (see
+   `build_plan_availability_groups()` in `app.py`).
+
+Everything else - every page, chart type, filter, static content, the
+design system, dark mode, and the CSV export - is fully implemented.
 
 ---
 
@@ -217,10 +206,10 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. (Optional) configure environment variables
-cp .example.env .env
-# edit .env if you want to connect a real Supabase project; otherwise
-# leave it as-is and the app will use the bundled JSON data.
+# 3. Configure environment variables (REQUIRED - the app is Databricks-only)
+cp .env.sample .env
+# fill in DATABRICKS_SERVER_HOSTNAME, DATABRICKS_HTTP_PATH,
+# DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET (service principal).
 
 # 4. Run the app
 python app.py
@@ -239,8 +228,10 @@ This app exposes a standard WSGI `server` object (`server = app.server` in
 
 1. In the Connect content folder, include: `app.py`, `utils.py`,
    `constants.py`, `queries.py`, `requirements.txt`, and the `assets/`
-   folder (with its `data/` subfolder). Do not include `.env` - set
-   environment variables through Connect's **Vars** pane instead.
+   folder (with its `data/` subfolder, which holds
+   `indicator_definitions.json`). Do not include `.env` - set environment
+   variables through Connect's **Vars** pane instead. The deployment host
+   must have network egress to the Databricks SQL warehouse.
 2. Publish with `rsconnect-python`:
 
    ```bash
@@ -254,9 +245,10 @@ This app exposes a standard WSGI `server` object (`server = app.server` in
    (Or use the **Publish** button in the Connect-aware IDE extension /
    Posit Workbench, selecting this directory and confirming the `app:server`
    entrypoint.)
-3. In the content's **Vars** settings on Connect, add any of the
-   variables from `.example.env` you want to set (Supabase credentials,
-   `AI_*` variables, etc.). None are required for the app to run.
+3. In the content's **Vars** settings on Connect, set the four
+   `DATABRICKS_*` variables from `.env.sample` (required), plus
+   `LDT_CATALOG` / `LDT_SCHEMA` / `LDT_DOCUMENTS_VOLUME` if they differ
+   from the defaults.
 4. Confirm the **Access** setting matches your intended audience (this is
    a public-analytics-style app in its original form, but Connect lets
    you restrict it to specific users/groups if needed).

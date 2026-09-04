@@ -8,4 +8,12 @@ pandas
 numpy
 gunicorn
 python-dotenv
-supabase
+
+# --- Databricks Unity Catalog data source ---
+# The app reads every dataset live from prd_mega.sgpbpi163 via an OAuth
+# service principal. There is no bundled-data runtime fallback.
+databricks-sql-connector
+databricks-sdk
+
+# Geometry decode/simplify for the choropleth boundaries stored in UC.
+shapely
