@@ -1372,7 +1372,7 @@ def update_strategy_inventory(search, readiness, doctype, translation, theme_dat
 
 if __name__ == "__main__":
     debug = os.environ.get("DASH_DEBUG", "true").lower() == "true"
-    port = int(os.environ.get("PORT", "8050"))
+    port = int(os.environ.get("PORT", "3000"))
     logger.info("Starting Dash server with debug=%s on port %s.", debug, port)
 
     run = getattr(app, "run", None) or app.run_server
