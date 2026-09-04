@@ -70,14 +70,14 @@ _REQUIRED = {
 
 # The 15 tables the app reads, grouped by role.
 INDICATOR_TABLES = [
-    "GPBP_LDT_NPL_admin_2",
-    "GPBP_LDT_SRB_admin_2",
-    "GPBP_LDT_ZMB_admin_2",
+    "ldt_gpbp_ldt_npl_admin_2_demo",
+    "ldt_gpbp_ldt_srb_admin_2_demo",
+    "ldt_gpbp_ldt_zmb_admin_2_demo",
 ]
 SCORE_TABLES = [
-    "GPBP_LDT_NPL_scores_admin_2",
-    "GPBP_LDT_SRB_scores_admin_2",
-    "GPBP_LDT_ZMB_scores_admin_2",
+    "ldt_gpbp_ldt_npl_scores_admin_2_demo",
+    "ldt_gpbp_ldt_srb_scores_admin_2_demo",
+    "ldt_gpbp_ldt_zmb_scores_admin_2_demo",
 ]
 BOUNDARY_TABLES = [
     "ldt_boundaries_admin0_nepal",

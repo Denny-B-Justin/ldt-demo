@@ -18,8 +18,8 @@ def svc():
 
 
 def test_fqtn_backtick_quoted():
-    assert queries._fqtn("GPBP_LDT_ZMB_admin_2") == (
-        f"`{constants.LDT_CATALOG}`.`{constants.LDT_SCHEMA}`.`GPBP_LDT_ZMB_admin_2`"
+    assert queries._fqtn("gpbp_ldt_zmb_admin_2") == (
+        f"`{constants.LDT_CATALOG}`.`{constants.LDT_SCHEMA}`.`gpbp_ldt_zmb_admin_2`"
     )
 
 

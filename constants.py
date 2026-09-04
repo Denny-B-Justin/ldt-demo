@@ -1917,8 +1917,8 @@ PILLAR_SCORE_LABELS = {d["label"] for d in SCORE_DEFINITIONS}
 COUNTRY_DATA_SOURCES = {
     "NPL": {
         "release_key_prefix": "npl",
-        "admin_table": "GPBP_LDT_NPL_admin_2",
-        "scores_table": "GPBP_LDT_NPL_scores_admin_2",
+        "admin_table": "ldt_gpbp_ldt_npl_admin_2_demo",
+        "scores_table": "ldt_gpbp_ldt_npl_scores_admin_2_demo",
         "boundary_table": "ldt_boundaries_admin2_nepal",
         "year_column": "Year",
         "year_column_candidates": ["Year", "year", "release_year", "data_year"],
@@ -1950,8 +1950,8 @@ COUNTRY_DATA_SOURCES = {
     },
     "ZMB": {
         "release_key_prefix": "zmb",
-        "admin_table": "GPBP_LDT_ZMB_admin_2",
-        "scores_table": "GPBP_LDT_ZMB_scores_admin_2",
+        "admin_table": "ldt_gpbp_ldt_zmb_admin_2_demo",
+        "scores_table": "ldt_gpbp_ldt_zmb_scores_admin_2_demo",
         "boundary_table": "ldt_boundaries_admin2_zambia",
         "year_column": "Year",
         "year_column_candidates": ["Year", "year", "release_year", "data_year"],
@@ -1984,8 +1984,8 @@ COUNTRY_DATA_SOURCES = {
     },
     "SRB": {
         "release_key_prefix": "srb",
-        "admin_table": "GPBP_LDT_SRB_admin_2",
-        "scores_table": "GPBP_LDT_SRB_scores_admin_2",
+        "admin_table": "ldt_gpbp_ldt_srb_admin_2_demo",
+        "scores_table": "ldt_gpbp_ldt_srb_scores_admin_2_demo",
         "boundary_table": "ldt_boundaries_admin2_serbia",
         "year_column": "Year",
         "year_column_candidates": ["Year", "year", "release_year", "data_year"],

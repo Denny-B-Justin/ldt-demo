@@ -155,8 +155,8 @@ Column names are resolved **tolerantly** (case- and punctuation-insensitive)
 against `constants.COUNTRY_DATA_SOURCES`, and every fetch is logged, e.g.:
 
 ```
-INFO | queries | Assembling ZMB analytics dataset from prd_mega.sgpbpi163 (GPBP_LDT_ZMB_admin_2 + GPBP_LDT_ZMB_scores_admin_2)
-INFO | queries | Databricks query returned 580 rows x 34 cols in 1.21s: SELECT * FROM `prd_mega`.`sgpbpi163`.`GPBP_LDT_ZMB_admin_2`
+INFO | queries | Assembling ZMB analytics dataset from prd_mega.sgpbpi163 (gpbp_ldt_zmb_admin_2 + gpbp_ldt_zmb_scores_admin_2)
+INFO | queries | Databricks query returned 580 rows x 34 cols in 1.21s: SELECT * FROM `prd_mega`.`sgpbpi163`.`gpbp_ldt_zmb_admin_2`
 INFO | queries | ZMB boundary columns resolved: municipality=NAM_2 district=NAM_1 province=NAM_1 geometry=geometry_wkt
 ```
 
