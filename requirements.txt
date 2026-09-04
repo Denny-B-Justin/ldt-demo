@@ -17,3 +17,4 @@ databricks-sdk
 
 # Geometry decode/simplify for the choropleth boundaries stored in UC.
 shapely
+pyproj
