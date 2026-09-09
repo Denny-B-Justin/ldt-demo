@@ -498,3 +498,39 @@ html[data-theme="dark"] .dash-graph { background: rgba(7,28,42,0.96); }
 
 /* Loading spinner container */
 ._dash-loading { color: var(--accent); }
+
+/* --------------------------------------------------------------------
+   16. Loading / skeleton states
+   --------------------------------------------------------------------
+   The analytics charts and strategy-inventory tables load after the page
+   shell (the shell itself is instant). These styles keep that wait calm:
+   a subtle shimmer placeholder instead of layout jumping around, and a
+   dimmed-but-visible previous chart while the next one is computed. */
+
+@keyframes ldt-shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+
+.ldt-skeleton {
+  border-radius: 1.25rem;
+  border: 1px solid var(--border-soft);
+  background: linear-gradient(90deg,
+    var(--surface) 0%, rgba(0,0,0,0.05) 20%, var(--surface) 40%);
+  background-size: 800px 100%;
+  animation: ldt-shimmer 1.4s ease-in-out infinite;
+  min-height: 320px;
+}
+html[data-theme="dark"] .ldt-skeleton {
+  background: linear-gradient(90deg,
+    rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.09) 20%, rgba(255,255,255,0.03) 40%);
+  background-size: 800px 100%;
+}
+
+/* Dash marks any element waiting on a callback. Keep stale content readable
+   (not hidden) so a filter change doesn't blank the screen. */
+*[data-dash-is-loading="true"] {
+  transition: opacity 120ms ease-in;
+}
+._dash-loading-callback,
+.dash-loading { color: var(--accent); }

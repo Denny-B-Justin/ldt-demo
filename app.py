@@ -44,6 +44,8 @@ from dash import ALL, Input, Output, State, callback_context, dcc, html, no_upda
 from dash.exceptions import PreventUpdate
 
 import constants
+import datastore
+import memo
 import queries
 import utils
 
@@ -82,6 +84,95 @@ app = dash.Dash(
 )
 server = app.server  # exposed for gunicorn / Posit Connect (see README)
 logger.info("Initialized Dash app with %s country workspaces.", len(constants.COUNTRIES))
+
+# Route every dataset read through the filesystem-cached, request-safe data
+# layer (instead of live Databricks queries on the request path).
+datastore.install_providers()
+
+# In Dash debug mode Werkzeug's reloader runs a supervisor process that also
+# imports this module; skip the background threads there (the child process,
+# which sets WERKZEUG_RUN_MAIN, is the one that serves).
+_IS_RELOADER_PARENT = (
+    os.environ.get("DASH_DEBUG", "true").lower() == "true"
+    and __name__ == "__main__"
+    and os.environ.get("WERKZEUG_RUN_MAIN") != "true"
+)
+
+# Kick a background data warm if the local artifacts are missing or stale.
+# This never blocks request handling; pages serve from the shipped snapshot /
+# bundled data until the fresh copy lands. (Also re-checked cheaply on every
+# datastore access, so it self-heals per worker process.)
+if not _IS_RELOADER_PARENT:
+    datastore.ensure_warm_started()
+
+
+def _prewarm_process() -> None:
+    """One-time, per-process costs paid off the request path: Plotly builds
+    its (slow) per-trace-type validators lazily on first use, which otherwise
+    lands on a user's first chart interaction (~1s). Touch each trace type and
+    the home summary here instead."""
+    try:
+        # Build one real figure of every kind the app renders. This forces
+        # Plotly's lazy, ~1s-on-first-use import of its template + validator
+        # machinery (`update_layout(template=...)`) to happen here rather than
+        # on a user's first chart.
+        import plotly.graph_objects as go
+
+        for trace, template in (
+            (go.Choroplethmap(geojson={"type": "FeatureCollection", "features": []}, locations=[], z=[]), "plotly_white"),
+            (go.Scatter(x=[0], y=[0]), "plotly_white"),
+            (go.Scatter(x=[0], y=[0]), "plotly_dark"),
+            (go.Scatter3d(x=[0], y=[0], z=[0]), "plotly_white"),
+            (go.Bar(x=[0], y=[0]), "plotly_white"),
+        ):
+            fig = go.Figure(trace)
+            fig.update_layout(template=template, margin=dict(l=0, r=0, t=0, b=0))
+            fig.to_plotly_json()
+        datastore.home_summary()
+        logger.info("Process prewarm complete.")
+    except Exception:  # noqa: BLE001
+        logger.exception("Process prewarm failed (non-fatal).")
+
+
+if os.environ.get("LDT_DISABLE_PREWARM", "0") != "1" and not _IS_RELOADER_PARENT:
+    import threading as _threading
+
+    _threading.Thread(target=_prewarm_process, name="ldt-prewarm", daemon=True).start()
+
+
+@server.route("/healthz")
+def _healthz():
+    from flask import jsonify
+
+    return jsonify({"status": "ok", "data": datastore.data_status()})
+
+
+@server.route("/ldt/admin/refresh", methods=["POST", "GET"])
+def _refresh_data():
+    """Force-rebuild the cached datasets from Databricks. Call this from a
+    Posit Connect scheduled job after each data release. Guarded by
+    LDT_REFRESH_TOKEN when that env var is set."""
+    from flask import jsonify, request
+
+    if datastore.REFRESH_TOKEN:
+        supplied = request.args.get("token") or request.headers.get("X-LDT-Refresh-Token")
+        if supplied != datastore.REFRESH_TOKEN:
+            return jsonify({"error": "unauthorized"}), 401
+
+    # A full warm can take minutes; run it in the background and return now so
+    # the caller (a scheduled job) doesn't hit a proxy timeout. Pass ?wait=1
+    # to block and get the manifest back.
+    if request.args.get("wait") == "1":
+        try:
+            return jsonify({"status": "refreshed", "manifest": datastore.warm(force=True)})
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Manual data refresh failed.")
+            return jsonify({"status": "error", "detail": str(exc)}), 500
+
+    import threading as _threading
+
+    _threading.Thread(target=datastore._safe_warm, name="ldt-manual-refresh", daemon=True).start()
+    return jsonify({"status": "refresh-started", "data": datastore.data_status()}), 202
 
 # --------------------------------------------------------------------------
 # App shell (root layout) - equivalent of src/app/layout.tsx
@@ -136,15 +227,18 @@ app.layout = html.Div(
 
 def render_home() -> html.Main:
     """Port of src/app/page.tsx"""
-    logger.debug("Rendering homepage with %s country datasets.", len(constants.COUNTRIES))
-    datasets = [queries.get_analytics_dataset(c["code"]) for c in constants.COUNTRIES]
-    total_lsgs = sum(d.get("coverage", {}).get("analyticsMunicipalityCount", 0) for d in datasets)
-    latest_year = max(d.get("release", {}).get("year", 0) for d in datasets)
+    logger.debug("Rendering homepage from the cached home summary.")
+    # The home page is static chrome plus three headline numbers. Those come
+    # from a tiny pre-computed summary (datastore), never a live Databricks
+    # read, so this page renders instantly regardless of warehouse state.
+    summary = datastore.home_summary()
+    total_lsgs = summary.get("lsgsLoaded")
+    latest_year = summary.get("latestYear")
 
     home_stats = [
-        {"value": str(len(constants.COUNTRIES)), "label": "Country workspaces"},
-        {"value": f"{total_lsgs:,}", "label": "LSGs currently loaded"},
-        {"value": str(latest_year), "label": "Latest data year"},
+        {"value": str(summary.get("countryWorkspaces") or len(constants.COUNTRIES)), "label": "Country workspaces"},
+        {"value": f"{total_lsgs:,}" if total_lsgs else "—", "label": "LSGs currently loaded"},
+        {"value": str(latest_year) if latest_year else "—", "label": "Latest data year"},
     ]
 
     return html.Main(
@@ -878,7 +972,11 @@ def render_analytics(slug: str) -> html.Main:
     if not country:
         return render_not_found()
 
-    page_data = queries.get_analytics_page_data(country["code"])
+    # First paint: filter bar + selection metadata only. The charts (and their
+    # heavy per-tab data) load afterwards through the tab callback, wrapped in
+    # dcc.Loading -- so the user only ever waits when they pick something to
+    # visualise, not when the page opens.
+    page_data = queries.get_analytics_page_data(country["code"], sections=set())
     admin = country["admin_labels"]
 
     return html.Main(
@@ -926,18 +1024,28 @@ def render_analytics(slug: str) -> html.Main:
             dcc.Tabs(id="analytics-tabs", value="map", className="ldt-tabs", children=[
                 dcc.Tab(label=t["label"], value=t["value"], className="tab", selected_className="tab--selected") for t in ANALYTICS_TABS
             ]),
-            dcc.Loading(html.Div(id="analytics-tab-content", style={"marginTop": "1.5rem"}), type="circle"),
+            dcc.Loading(
+                html.Div(id="analytics-tab-content", style={"marginTop": "1.5rem"}),
+                type="circle",
+                delay_show=200,          # don't flash the spinner on memoised (instant) results
+                delay_hide=100,
+                overlay_style={"visibility": "visible", "opacity": 0.45},
+            ),
         ],
     )
 
 
+@memo.keyed_memo(maxsize=192)
 def render_analytics_tab_content(country_code: str, tab: str, year: int, province: str, municipality_id: str, metric_id: str, dark: bool) -> html.Div:
-    """Builds the content of the active analytics tab. Called by the analytics callback."""
+    """Builds the content of the active analytics tab. Called by the analytics
+    callback. Memoised: within a data release each argument combination has a
+    single answer, so a revisited selection or tab is a dict lookup."""
     country = constants.COUNTRY_BY_CODE[country_code]
     admin = country["admin_labels"]
     page_data = queries.get_analytics_page_data(
         country_code, year=year, province=province, municipality_id=municipality_id,
         metric_id=metric_id, x_metric_id=constants.DEFAULT_SCATTER_X_METRIC_ID, y_metric_id=constants.DEFAULT_SCATTER_Y_METRIC_ID,
+        sections={tab or "map"},
     )
 
     if tab == "map":
@@ -1039,11 +1147,17 @@ def render_strategy_inventory(slug: str) -> html.Main:
                     ]),
                 ]),
             ]),
-            html.Div(className="grid-2", style={"marginTop": "1.5rem"}, children=[
-                html.Div(id="strategy-readiness-chart"),
-                html.Div(id="strategy-year-chart"),
-            ]),
-            html.Div(id="strategy-table", style={"marginTop": "1.5rem"}),
+            dcc.Loading(
+                type="circle",
+                delay_show=200,
+                children=[
+                    html.Div(className="grid-2", style={"marginTop": "1.5rem"}, children=[
+                        html.Div(id="strategy-readiness-chart"),
+                        html.Div(id="strategy-year-chart"),
+                    ]),
+                    html.Div(id="strategy-table", style={"marginTop": "1.5rem"}),
+                ],
+            ),
         ],
     )
 
@@ -1311,6 +1425,26 @@ def download_sng_csv(n_clicks_list):
 # STRATEGY INVENTORY CALLBACKS
 # ==========================================================================
 
+@memo.keyed_memo(maxsize=16)
+def _strategy_static_blocks(country_code: str, dark: bool):
+    """Summary cards + the two overview charts. None of these depend on the
+    search / filter inputs, so they are computed once per (country, theme)
+    and replayed while the user types."""
+    dataset = queries.get_strategy_inventory_dataset(country_code)
+    if not dataset:
+        return None
+    summary = queries.get_strategy_inventory_summary(
+        dataset["records"], dataset["expected_lsg_count"], dataset.get("summary_override")
+    )
+    readiness_fig = utils.build_readiness_bar_chart(summary["status_breakdown"], dark=dark)
+    year_fig = utils.build_publication_year_chart(summary["publication_year_counts"], dark=dark)
+    return (
+        build_strategy_summary_cards(summary),
+        html.Div(className="content-card", children=[html.H3("Readiness breakdown"), utils.wrap_chart(readiness_fig, "strategy-readiness-graph")]),
+        html.Div(className="content-card", children=[html.H3("Documents by publication year"), utils.wrap_chart(year_fig, "strategy-year-graph")]),
+    )
+
+
 @app.callback(
     Output("strategy-summary-cards", "children"),
     Output("strategy-readiness-chart", "children"),
@@ -1334,9 +1468,12 @@ def update_strategy_inventory(search, readiness, doctype, translation, theme_dat
             raise PreventUpdate
 
         dark = (theme_data or {}).get("theme") == "dark"
-        all_records = dataset["records"]
-        summary = queries.get_strategy_inventory_summary(all_records, dataset["expected_lsg_count"], dataset.get("summary_override"))
+        static_blocks = _strategy_static_blocks(country_code, dark)
+        if static_blocks is None:
+            raise PreventUpdate
+        summary_cards, readiness_block, year_block = static_blocks
 
+        all_records = dataset["records"]
         filtered = all_records
         if search:
             needle = search.strip().lower()
@@ -1348,17 +1485,9 @@ def update_strategy_inventory(search, readiness, doctype, translation, theme_dat
         if translation and translation != "all":
             filtered = [r for r in filtered if r.get("translation_status") == translation]
 
-        summary_cards = build_strategy_summary_cards(summary)
-        readiness_fig = utils.build_readiness_bar_chart(summary["status_breakdown"], dark=dark)
-        year_fig = utils.build_publication_year_chart(summary["publication_year_counts"], dark=dark)
         table = build_strategy_table(filtered)
 
-        return (
-            summary_cards,
-            html.Div(className="content-card", children=[html.H3("Readiness breakdown"), utils.wrap_chart(readiness_fig, "strategy-readiness-graph")]),
-            html.Div(className="content-card", children=[html.H3("Documents by publication year"), utils.wrap_chart(year_fig, "strategy-year-graph")]),
-            table,
-        )
+        return (summary_cards, readiness_block, year_block, table)
     except Exception:
         logger.exception("Strategy inventory refresh failed for %s.", country_code)
         raise

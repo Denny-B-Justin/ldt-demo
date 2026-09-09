@@ -48,6 +48,13 @@ import constants
 
 logger = logging.getLogger(__name__)
 
+try:  # enables the fast Arrow / CloudFetch result path in execute_query()
+    import pyarrow as _pyarrow  # noqa: F401
+
+    _HAS_PYARROW = True
+except Exception:  # noqa: BLE001
+    _HAS_PYARROW = False
+
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 INDICATOR_DEFINITIONS_PATH = os.path.join(ASSETS_DIR, "data", "indicator_definitions.json")
 
@@ -163,9 +170,16 @@ class QueryService:
         ) as conn:
             cursor = conn.cursor()
             cursor.execute(query)
-            rows = cursor.fetchall()
-            columns = [desc[0] for desc in cursor.description]
-            df = pd.DataFrame(rows, columns=columns)
+            # Arrow -> pandas (and CloudFetch) is markedly faster than
+            # materialising Row objects for the wide full-table reads this app
+            # does. Only try it when pyarrow is actually available, so the
+            # cursor is never left half-consumed by a failed attempt.
+            if _HAS_PYARROW:
+                df = cursor.fetchall_arrow().to_pandas()
+            else:
+                rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description]
+                df = pd.DataFrame(rows, columns=columns)
 
         logger.info(
             "Databricks query returned %d rows x %d cols in %.2fs: %s",
@@ -746,6 +760,33 @@ def _assemble_feature_collection(country_code: str) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# Pluggable data providers
+# --------------------------------------------------------------------------
+#
+# By default the assemblers below read straight from Databricks. ``datastore``
+# imports this module and calls ``set_data_providers()`` to swap in
+# filesystem-cached, request-safe versions, so that web requests never block
+# on a live query. The test-suite never imports ``datastore``, so it keeps the
+# direct-from-Databricks behaviour (backed by the monkeypatched executor).
+
+_ANALYTICS_PROVIDER = _assemble_dataset
+_FEATURE_PROVIDER = _assemble_feature_collection
+_STRATEGY_PROVIDER = None  # falls back to _build_strategy_inventory (defined below)
+
+
+def set_data_providers(analytics=None, features=None, strategy=None) -> None:
+    """Override the functions used to obtain assembled datasets."""
+    global _ANALYTICS_PROVIDER, _FEATURE_PROVIDER, _STRATEGY_PROVIDER
+    if analytics is not None:
+        _ANALYTICS_PROVIDER = analytics
+    if features is not None:
+        _FEATURE_PROVIDER = features
+    if strategy is not None:
+        _STRATEGY_PROVIDER = strategy
+    clear_caches()
+
+
+# --------------------------------------------------------------------------
 # Cached public accessors
 # --------------------------------------------------------------------------
 
@@ -763,15 +804,16 @@ def _cached(cache: Dict[str, Tuple[float, Any]], key: str, builder):
 
 def get_analytics_dataset(country_code: str) -> Dict[str, Any]:
     """Return the fully-assembled analytics dataset for a country (cached)."""
-    return _cached(_dataset_cache, country_code.upper(), _assemble_dataset)
+    return _cached(_dataset_cache, country_code.upper(), _ANALYTICS_PROVIDER)
 
 
 def load_map_feature_collection(country_code: str) -> Dict[str, Any]:
     """Return the admin-2 boundary GeoJSON FeatureCollection for a country."""
-    fc = _cached(_feature_cache, country_code.upper(), _assemble_feature_collection)
-    # Backfill map coverage onto the (separately cached) dataset.
+    fc = _cached(_feature_cache, country_code.upper(), _FEATURE_PROVIDER)
+    # Backfill map coverage onto the (separately cached) dataset. When the
+    # datastore provides the dataset it has already done this, so skip.
     dataset = _dataset_cache.get(country_code.upper())
-    if dataset:
+    if dataset and not dataset[1].get("mapFeatureKeys"):
         keys = {f["properties"]["compositeKey"] for f in fc.get("features", [])}
         analytics_keys = {m["compositeKey"] for m in dataset[1]["municipalities"]}
         matched = keys & analytics_keys
@@ -987,8 +1029,18 @@ def get_analytics_page_data(
     metric_id: Optional[str] = None,
     x_metric_id: Optional[str] = None,
     y_metric_id: Optional[str] = None,
+    sections: Optional[set] = None,
 ) -> Dict[str, Any]:
-    """Single dict bundling everything the analytics page needs."""
+    """Single dict bundling everything the analytics page needs.
+
+    ``sections`` limits which (expensive) blocks are actually computed:
+    ``{"map"}``, ``{"scatter2d"}``, ``{"scatter3d"}``, ``{"drivers"}`` or any
+    combination. ``None`` (default) builds everything -- backwards compatible.
+    Pass ``set()`` for just the filter/selection metadata (the fast first
+    paint of the analytics page). The unbuilt blocks are still present in the
+    result, just empty.
+    """
+    want = {"map", "scatter2d", "scatter3d", "drivers"} if sections is None else set(sections)
     dataset = get_analytics_dataset(country_code)
     country = constants.COUNTRY_BY_CODE.get(country_code, constants.DEFAULT_COUNTRY)
 
@@ -1024,84 +1076,93 @@ def get_analytics_page_data(
     if selected_municipality is None:
         selected_municipality = municipalities_for_year[0]
 
-    # Map features
-    feature_collection = load_map_feature_collection(country_code)
-    by_composite_key = {m["compositeKey"]: m for m in municipalities_for_year}
-    map_features = []
-    mapped_keys = set()
-    for feature in feature_collection.get("features", []):
-        composite_key = feature["properties"].get("compositeKey")
-        municipality = by_composite_key.get(composite_key)
-        if municipality is None:
-            continue
-        mapped_keys.add(composite_key)
-        if selected_province != "all" and feature["properties"].get("Province") != selected_province:
-            continue
-        value = get_metric_value(municipality, selected_metric)
-        map_features.append({
-            "type": feature["type"],
-            "properties": feature["properties"],
-            "geometry": feature["geometry"],
-            "metricValue": value,
-        })
-
-    metric_summary = build_metric_summary(province_filtered, selected_metric)
-
     score_definitions = get_score_definitions(country_code)
     indicator_definitions = get_indicator_definitions(country_code)
     indicator_by_id = {d["id"]: d for d in indicator_definitions}
     selected_score_definition = infer_score_definition(score_definitions, selected_metric)
-    national_component_averages = build_national_component_averages(municipalities_for_year)
 
-    score_component_definitions = []
-    score_driver_rows = []
-    for index, component_id in enumerate(selected_score_definition["componentIds"]):
-        label = (
-            selected_score_definition["componentLabels"][index]
-            if index < len(selected_score_definition["componentLabels"])
-            else component_id
-        )
-        score_component_definitions.append({"id": component_id, "label": label, "description": None})
-        municipality_value = selected_municipality["scoreComponents"].get(component_id)
-        national_value = national_component_averages.get(component_id)
-        delta = None
-        if municipality_value is not None and national_value is not None:
-            delta = round(municipality_value - national_value, 2)
-        score_driver_rows.append({
-            "componentId": component_id,
-            "label": label,
-            "municipalityValue": municipality_value,
-            "nationalValue": national_value,
-            "delta": delta,
-        })
+    # -- Map features (the single most expensive block: iterates the whole
+    #    boundary FeatureCollection and carries its geometry) ---------------
+    map_features: List[Dict[str, Any]] = []
+    mapped_keys: set = set()
+    metric_summary: Dict[str, Optional[float]] = {"minimum": None, "maximum": None, "average": None}
+    if "map" in want:
+        feature_collection = load_map_feature_collection(country_code)
+        by_composite_key = {m["compositeKey"]: m for m in municipalities_for_year}
+        for feature in feature_collection.get("features", []):
+            composite_key = feature["properties"].get("compositeKey")
+            municipality = by_composite_key.get(composite_key)
+            if municipality is None:
+                continue
+            mapped_keys.add(composite_key)
+            if selected_province != "all" and feature["properties"].get("Province") != selected_province:
+                continue
+            value = get_metric_value(municipality, selected_metric)
+            map_features.append({
+                "type": feature["type"],
+                "properties": feature["properties"],
+                "geometry": feature["geometry"],
+                "metricValue": value,
+            })
+        metric_summary = build_metric_summary(province_filtered, selected_metric)
+    else:
+        mapped_keys = set(dataset.get("mapFeatureKeys", []))
 
-    waterfalls = build_score_waterfalls(country_code, selected_municipality, municipalities_for_year)
-    province_summary = build_province_summary(country_code, municipalities_for_year)
+    # -- Score-driver / waterfall block ----------------------------------
+    score_component_definitions: List[Dict[str, Any]] = []
+    score_driver_rows: List[Dict[str, Any]] = []
+    waterfalls: List[Dict[str, Any]] = []
+    if "drivers" in want:
+        national_component_averages = build_national_component_averages(municipalities_for_year)
+        for index, component_id in enumerate(selected_score_definition["componentIds"]):
+            label = (
+                selected_score_definition["componentLabels"][index]
+                if index < len(selected_score_definition["componentLabels"])
+                else component_id
+            )
+            score_component_definitions.append({"id": component_id, "label": label, "description": None})
+            municipality_value = selected_municipality["scoreComponents"].get(component_id)
+            national_value = national_component_averages.get(component_id)
+            delta = None
+            if municipality_value is not None and national_value is not None:
+                delta = round(municipality_value - national_value, 2)
+            score_driver_rows.append({
+                "componentId": component_id,
+                "label": label,
+                "municipalityValue": municipality_value,
+                "nationalValue": national_value,
+                "delta": delta,
+            })
+        waterfalls = build_score_waterfalls(country_code, selected_municipality, municipalities_for_year)
+
+    province_summary = build_province_summary(country_code, municipalities_for_year) if "drivers" in want else []
 
     scatter2d_points = []
-    for m in province_filtered:
-        scatter2d_points.append({
-            "id": m["id"],
-            "label": m["municipality"],
-            "district": m["district"],
-            "province": m["province"],
-            "x": m["scores"].get(selected_x_metric["id"]),
-            "y": m["scores"].get(selected_y_metric["id"]),
-            "selected": m["id"] == selected_municipality["id"],
-        })
+    if "scatter2d" in want:
+        for m in province_filtered:
+            scatter2d_points.append({
+                "id": m["id"],
+                "label": m["municipality"],
+                "district": m["district"],
+                "province": m["province"],
+                "x": m["scores"].get(selected_x_metric["id"]),
+                "y": m["scores"].get(selected_y_metric["id"]),
+                "selected": m["id"] == selected_municipality["id"],
+            })
 
     scatter3d_points = []
-    for m in province_filtered:
-        scatter3d_points.append({
-            "id": m["id"],
-            "label": m["municipality"],
-            "district": m["district"],
-            "province": m["province"],
-            "x": m["scores"].get("prosperity_score"),
-            "y": m["scores"].get("infrastructure_score"),
-            "z": m["scores"].get("livability_score"),
-            "selected": m["id"] == selected_municipality["id"],
-        })
+    if "scatter3d" in want:
+        for m in province_filtered:
+            scatter3d_points.append({
+                "id": m["id"],
+                "label": m["municipality"],
+                "district": m["district"],
+                "province": m["province"],
+                "x": m["scores"].get("prosperity_score"),
+                "y": m["scores"].get("infrastructure_score"),
+                "z": m["scores"].get("livability_score"),
+                "selected": m["id"] == selected_municipality["id"],
+            })
 
     coverage = dict(dataset.get("coverage", {}))
     coverage["mapMunicipalityCount"] = len(mapped_keys)
@@ -1277,12 +1338,22 @@ _LANGUAGE_TOKENS = {
 
 def _workspace_client():
     from databricks.sdk import WorkspaceClient
+    from databricks.sdk.core import Config
 
-    return WorkspaceClient(
+    # Bound the Volume Files API calls so an unreachable / slow workspace can
+    # never wedge the caller (the strategy-inventory build, or the background
+    # warm) indefinitely. These are Config attributes, not WorkspaceClient
+    # kwargs, so they have to go through an explicit Config.
+    timeout = float(os.environ.get("LDT_WORKSPACE_HTTP_TIMEOUT_SECONDS", "20"))
+    retry_budget = int(os.environ.get("LDT_WORKSPACE_RETRY_TIMEOUT_SECONDS", "40"))
+    config = Config(
         host=f"https://{constants.DATABRICKS_SERVER_HOSTNAME}",
         client_id=constants.DATABRICKS_CLIENT_ID,
         client_secret=constants.DATABRICKS_CLIENT_SECRET,
+        http_timeout_seconds=timeout,
+        retry_timeout_seconds=retry_budget,
     )
+    return WorkspaceClient(config=config)
 
 
 def _list_volume_tree(root: str, max_depth: int = 4) -> List[Dict[str, Any]]:
@@ -1400,7 +1471,8 @@ def get_strategy_inventory_dataset(country_code: str) -> Optional[Dict[str, Any]
     country = constants.COUNTRY_BY_CODE.get(country_code)
     if not country or country["slug"] not in constants.STRATEGY_INVENTORY_SLUGS:
         return None
-    return _cached(_strategy_cache, country_code.upper(), lambda _k: _build_strategy_inventory(country_code))
+    provider = _STRATEGY_PROVIDER or _build_strategy_inventory
+    return _cached(_strategy_cache, country_code.upper(), lambda _k: provider(country_code))
 
 
 def get_readiness_category(record: Dict[str, Any]) -> str:

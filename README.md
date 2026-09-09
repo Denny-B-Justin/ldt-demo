@@ -20,7 +20,11 @@ layer reads live from Databricks Unity Catalog (see section 3).
 | `app.py` | Main Dash application: page layouts for every route, the router, and every callback (theme, navigation, analytics filters, strategy-inventory filters, CSV export). |
 | `utils.py` | Toolkit of reusable pieces: Plotly figure builders (choropleth map, 2D/3D scatter, waterfall, bar charts) and reusable Dash UI components (header, footer, cards, badges, buttons). |
 | `constants.py` | All static content and configuration: navigation, design tokens/colors, country metadata, and the full text content of the About, Methodology, Roadmap, Resources, and Release Notes pages. |
-| `queries.py` | The data-access layer: `QueryService` (cached Databricks SQL executor), the Unity Catalog -> `analytics-data.json`-shape assembler, boundary geometry decode, the documents-Volume strategy inventory, plus every pure data-shaping function (score averages, province summaries, waterfall/driver calculations, strategy-inventory readiness logic). |
+| `queries.py` | The data-access layer: `QueryService` (cached Databricks SQL executor), the Unity Catalog -> `analytics-data.json`-shape assembler, boundary geometry decode, the documents-Volume strategy inventory, plus every pure data-shaping function (score averages, province summaries, waterfall/driver calculations, strategy-inventory readiness logic). The assemblers are pluggable providers -- `datastore.py` swaps in cached versions so requests never call them directly. |
+| `datastore.py` | The request-safe data layer. Runs the Databricks assemblers **once**, off the request path, into gzipped-JSON artifacts on disk; every page then renders from a local dict lookup. Background `warm()`, staleness scheduling, `/healthz` + refresh support. See section 3. |
+| `memo.py` | Small bounded LRU memo for deterministic-within-a-release results (assembled tab payloads, built figures, rendered tab content). Flushed automatically whenever `datastore` lands fresh data. |
+| `gunicorn.conf.py` | Production server config: threaded workers (so one slow request can't freeze the app), `preload_app`, per-worker background warm. |
+| `scripts/build_snapshot.py` | Builds the shipped data snapshot (`assets/data/_snapshot/`) before a deploy, so the first request after deploy is instant. |
 | `assets/styles.css` | The full design system (CSS custom properties for light/dark themes) plus hand-written component classes that reproduce the original Tailwind-based UI (Dash has no Tailwind build step, so this is a plain CSS port). Dash auto-loads everything in `assets/`. |
 | `assets/*.png`, `assets/*.webp` | Logos and figures used across the site (header/footer logos, About/Methodology page figures, partner logos). Referenced from Python with `/assets/<file>` (Dash's `get_asset_url` convention). |
 | `assets/data/<country>/*.json`, `*.geojson` | Bundled analytics snapshots and municipality boundary files per country - the offline fallback data source (see Section 3). |
@@ -107,13 +111,62 @@ required.
 
 ## 3. Data sources and the database
 
-The app reads **every dataset live from Databricks Unity Catalog** (schema
-`prd_mega.sgpbpi163`) through an OAuth service principal. There is **no
-bundled-data fallback**: if the four `DATABRICKS_*` environment variables
-are not set, `queries.py` raises `EnvironmentError` at import and the app
-does not start.
+### 3.0 How data flows (and when queries run)
 
-### 3.1 Unity Catalog tables
+Unity Catalog data changes only on a **release cadence**, so the app treats
+the assembled datasets as build artifacts rather than something to fetch per
+request.
+
+```
+                         BUILD / BACKGROUND (never on a request)
+  Databricks UC ──► queries._assemble_* ──► datastore.warm() ──► .ldt_cache/*.json.gz
+       ▲                                          ▲                     │
+       │                                          │                     ▼
+  scripts/build_snapshot.py            POST /ldt/admin/refresh    manifest.json
+  (pre-deploy, writes                  + auto warm when the
+   assets/data/_snapshot/)             newest artifact is stale
+
+                         REQUEST PATH (pure local reads)
+  browser ──► router callback ──► render_*() ──► datastore.<accessor>()
+                                                    │
+                    in-process memo ◄── .ldt_cache ◄── assets/data/_snapshot
+                                                    ◄── assets/data/<country>/  (legacy bundled)
+```
+
+| Page / interaction | What runs on the request | Databricks? |
+|---|---|---|
+| Home, About, Methodology, Roadmap, Resources, Release Notes | Static `constants.py`; Home adds a 3-number lookup from `datastore.home_summary()` | Never |
+| Country landing page | `datastore.analytics_dataset()` dict lookup + pure shaping | Never |
+| Analytics page — **first paint** | Filter/selection metadata only (`get_analytics_page_data(..., sections=set())`) | Never |
+| Analytics page — a tab / filter change | Builds **only that tab's** data + figure, memoised by selection; wrapped in `dcc.Loading` | Never |
+| Strategy inventory | Serves the artifact `warm()` produced; shows a "not loaded yet" state until it exists | Never on the request |
+| `warm()` / refresh / `build_snapshot.py` | Full `SELECT *` reads + assembly for every country | **Yes** — background only |
+
+The only wait a user ever sees is a chart building after they pick something to
+visualise, and only the first time that exact selection is chosen per worker.
+
+### 3.1 Databricks and the artifact cache
+
+The datasets **originate** in Databricks Unity Catalog (schema
+`prd_mega.sgpbpi163`) via an OAuth service principal. The four `DATABRICKS_*`
+environment variables are still required — `queries.py` raises
+`EnvironmentError` at import without them.
+
+Artifacts are resolved in this order, per country:
+
+1. `LDT_CACHE_DIR` (default `./.ldt_cache`) — writable, refreshed at runtime.
+2. `LDT_SNAPSHOT_DIR` (default `assets/data/_snapshot/`) — read-only, shipped
+   with the deploy by `scripts/build_snapshot.py`.
+3. `assets/data/<country>/analytics-data.json` + `municipalities.geojson` —
+   the legacy bundled files, now a genuine last-resort fallback.
+
+Serving from 2 or 3 also schedules a background `warm()` so the writable cache
+catches up. `warm()` runs when the newest artifact is older than
+`LDT_DATA_MAX_AGE_SECONDS` (default 12h), on process start, or on demand via
+`POST /ldt/admin/refresh` (guard with `LDT_REFRESH_TOKEN`; point a Posit
+Connect scheduled job at it after each data release).
+
+### 3.2 Unity Catalog tables
 
 Per country (`NPL` / `SRB` / `ZMB`):
 
@@ -132,7 +185,7 @@ Static indicator metadata (labels, descriptions, direction, pillar,
 sources - identical across all three countries) ships in
 `assets/data/indicator_definitions.json` rather than a table.
 
-### 3.2 How the dataset is assembled
+### 3.3 How the dataset is assembled
 
 `queries.py` mirrors, function for function,
 `wb-ldt-app/scripts/lib/nepal-data.mjs` - the Node script that generated
@@ -165,25 +218,33 @@ If a column cannot be resolved by the tolerant match, run
 for all 15 tables and walks the Volume) and correct the exact names in the
 relevant `constants.COUNTRY_DATA_SOURCES` block.
 
-### 3.3 Where each page's data comes from
+### 3.4 Where each page's data comes from
+
+All reads below resolve from the local artifact cache (section 3.1), never a
+live query. See the flow table in section 3.0 for what actually executes.
 
 | Page | Data source |
 |---|---|
-| Home | `queries.get_analytics_dataset()` per country, aggregated into global coverage stats. |
-| About, Methodology, Roadmap, Resources, Release Notes | 100% static content from `constants.py` - no database calls. |
-| Country landing page | `queries.load_country_dataset()` + `queries.build_country_home_model()` + `queries.get_country_landing_actions()` / `get_plan_availability_disclosure()`. |
-| Country analytics page | `queries.get_analytics_page_data()` - assembles filters, selected municipality, map features, scatter points, score-driver rows, and waterfall groups. |
-| Strategy inventory page | `queries.get_strategy_inventory_dataset()` (documents Volume listing) + `queries.get_strategy_inventory_summary()` / `get_readiness_category()`. |
+| Home | `datastore.home_summary()` — 3 pre-computed numbers. |
+| About, Methodology, Roadmap, Resources, Release Notes | 100% static content from `constants.py`. |
+| Country landing page | `queries.load_country_dataset()` (→ `datastore.analytics_dataset()`) + pure shaping. |
+| Country analytics page | `queries.get_analytics_page_data(..., sections=...)` — only the requested tab's blocks, memoised per selection. |
+| Strategy inventory page | `datastore.strategy_inventory()` — the artifact from `warm()`. |
 
-### 3.4 Tests and offline development
+### 3.5 Tests and offline development
 
 `pytest` (`pip install -r requirements-dev.txt`) runs fully offline - the
 suite monkeypatches `queries.execute_query` with synthetic DataFrames whose
 column names match the source CSVs, so the assembler's expected output is
-known exactly. The bundled `assets/data/<country>/*.json` snapshots are kept
-only as a reference for those fixtures; nothing reads them at runtime.
+known exactly. `tests/test_datastore.py` covers artifact resolution, `warm()`,
+and that the accessors never touch the query path.
 
-### 3.5 What was intentionally simplified
+For offline UI work without Databricks, the bundled
+`assets/data/<country>/analytics-data.json` + `municipalities.geojson` files
+are used automatically as the last-resort fallback (set `LDT_DISABLE_BG_WARM=1`
+to stop the futile background warm attempts).
+
+### 3.6 What was intentionally simplified
 
 1. **The multi-stage AI Planning Brief pipeline** is not reimplemented.
 2. **Per-municipality plan availability** - the country-page "plan source
@@ -211,13 +272,19 @@ cp .env.sample .env
 # fill in DATABRICKS_SERVER_HOSTNAME, DATABRICKS_HTTP_PATH,
 # DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET (service principal).
 
-# 4. Run the app
-python app.py
+# 4. (optional) build a fresh data snapshot to ship with the app
+python scripts/build_snapshot.py     # writes assets/data/_snapshot/
+
+# 5. Run the app
+python app.py                        # dev server
+gunicorn -c gunicorn.conf.py app:server   # production-like
 # -> Dash is running on http://127.0.0.1:8050/
 ```
 
-Set `DASH_DEBUG=false` in `.env` (or your shell) to run without hot
-reload, and `PORT=<n>` to change the port.
+On start the app renders immediately from the shipped snapshot (or the bundled
+fallback) and kicks a **background** `warm()` to refresh `./.ldt_cache/` from
+Databricks. Set `DASH_DEBUG=false` to run without hot reload, `PORT=<n>` to
+change the port, and `LDT_DISABLE_BG_WARM=1` for pure offline UI work.
 
 ---
 
@@ -226,12 +293,16 @@ reload, and `PORT=<n>` to change the port.
 This app exposes a standard WSGI `server` object (`server = app.server` in
 `app.py`), which is what Posit Connect's Python/Dash content type expects.
 
+0. **Build the data snapshot first:** `python scripts/build_snapshot.py`, and
+   include the resulting `assets/data/_snapshot/` in the bundle. This is what
+   makes the first request after a deploy instant instead of waiting on the
+   background warm.
 1. In the Connect content folder, include: `app.py`, `utils.py`,
-   `constants.py`, `queries.py`, `requirements.txt`, and the `assets/`
-   folder (with its `data/` subfolder, which holds
-   `indicator_definitions.json`). Do not include `.env` - set environment
-   variables through Connect's **Vars** pane instead. The deployment host
-   must have network egress to the Databricks SQL warehouse.
+   `constants.py`, `queries.py`, `datastore.py`, `memo.py`,
+   `gunicorn.conf.py`, `requirements.txt`, `scripts/`, and the `assets/`
+   folder (with `data/`, including `_snapshot/`). Do not include `.env` - set
+   environment variables through Connect's **Vars** pane instead. The
+   deployment host must have network egress to the Databricks SQL warehouse.
 2. Publish with `rsconnect-python`:
 
    ```bash
@@ -248,14 +319,21 @@ This app exposes a standard WSGI `server` object (`server = app.server` in
 3. In the content's **Vars** settings on Connect, set the four
    `DATABRICKS_*` variables from `.env.sample` (required), plus
    `LDT_CATALOG` / `LDT_SCHEMA` / `LDT_DOCUMENTS_VOLUME` if they differ
-   from the defaults.
+   from the defaults. Also set:
+   - `LDT_CACHE_DIR` to a **writable, persistent** path on the content
+     (so refreshed artifacts survive between requests and restarts).
+   - `LDT_REFRESH_TOKEN` to a secret, then add a Connect **scheduled job**
+     that `POST`s to `https://<connect>/content/<guid>/ldt/admin/refresh?token=<secret>`
+     shortly after each data release. (The app also self-refreshes every
+     `LDT_DATA_MAX_AGE_SECONDS`.)
+   - `WEB_CONCURRENCY` / `GUNICORN_THREADS` if the defaults (3 / 4) don't
+     suit the instance size.
 4. Confirm the **Access** setting matches your intended audience (this is
    a public-analytics-style app in its original form, but Connect lets
    you restrict it to specific users/groups if needed).
 
-No server-side build step is required beyond `pip install -r
-requirements.txt` - Connect handles that automatically from the manifest
-it generates during deploy.
+`/healthz` returns the data-layer status (artifact age, last warm result,
+whether the cache dir is writable) — useful for a Connect health check.
 
 ---
 
