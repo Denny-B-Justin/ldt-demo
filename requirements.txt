@@ -1,9 +1,20 @@
 # Local Development Tracker (Dash) - requirements
-# Tested against Python 3.9 - 3.12. Pin versions loosely so Posit Connect's
-# package manager can resolve a compatible build for its Python environment.
-
-dash
-plotly
+# Tested against Python 3.9 - 3.12.
+#
+# dash and plotly are pinned (not left loose) because the choropleth map
+# (utils.build_choropleth_figure) uses go.Choroplethmap, the MapLibre-based
+# trace that plotly.py only gained in 5.24.0 - the client-side renderer for
+# it only shipped in dash's bundled plotly.js from dash 2.18.0 onward. Posit
+# Connect resolves/caches its environment from this file's checksum and does
+# not silently re-resolve on its own, so an unpinned requirement here can
+# leave Connect running an older dash/plotly pair (installed before this
+# file's checksum last changed) whose bundled JS silently ignores the
+# "choroplethmap" trace - the map area renders blank with no server error
+# while every other page element works, because the figure and its data are
+# still built correctly on the Python side. Bump these pins (and redeploy)
+# whenever the map relies on newer Plotly map features.
+dash>=4.0.0
+plotly>=6.0.1
 pandas
 numpy
 gunicorn
