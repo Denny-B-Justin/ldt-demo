@@ -81,6 +81,15 @@ _BG_WARM_DISABLED = os.environ.get("LDT_DISABLE_BG_WARM", "0") == "1"
 # Token gate for the POST /ldt/admin/refresh route wired up in app.py.
 REFRESH_TOKEN = os.environ.get("LDT_REFRESH_TOKEN", "")
 
+# Bypass the staleness check (LDT_DATA_MAX_AGE_SECONDS) and the failed-warm
+# cooldown on the next process start, and warm unconditionally instead. Set
+# this for one restart right after fixing something that was blocking
+# Databricks (e.g. rotated credentials) so the existing .ldt_cache artifacts
+# get replaced immediately rather than waiting out the 12h freshness window;
+# unset it again afterwards, since it forces a full Databricks rebuild on
+# every worker's startup for as long as it stays set.
+_FORCE_WARM_ON_START = os.environ.get("LDT_FORCE_WARM_ON_START", "0") == "1"
+
 
 # --------------------------------------------------------------------------
 # In-process memo (per worker) -- the hot path
@@ -490,7 +499,18 @@ def _schedule_warm_if_stale() -> None:
 
 def ensure_warm_started() -> None:
     """Call at process start (and it's cheap to call again): kicks a
-    background warm if the local artifacts are missing or stale."""
+    background warm if the local artifacts are missing or stale, or
+    unconditionally (ignoring staleness and the retry cooldown) when
+    LDT_FORCE_WARM_ON_START=1."""
+    global _bg_thread
+    if _FORCE_WARM_ON_START:
+        with _bg_lock:
+            if _bg_thread is not None and _bg_thread.is_alive():
+                return
+            _bg_thread = threading.Thread(target=_safe_warm, name="ldt-datastore-warm", daemon=True)
+            _bg_thread.start()
+            logger.info("datastore: LDT_FORCE_WARM_ON_START=1 - forcing background warm from Databricks")
+        return
     _schedule_warm_if_stale()
 
 
