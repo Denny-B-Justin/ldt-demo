@@ -164,7 +164,13 @@ Serving from 2 or 3 also schedules a background `warm()` so the writable cache
 catches up. `warm()` runs when the newest artifact is older than
 `LDT_DATA_MAX_AGE_SECONDS` (default 12h), on process start, or on demand via
 `POST /ldt/admin/refresh` (guard with `LDT_REFRESH_TOKEN`; point a Posit
-Connect scheduled job at it after each data release).
+Connect scheduled job at it after each data release). Set
+`LDT_FORCE_WARM_ON_START=1` for one restart to skip the 12h staleness check
+and the failed-warm cooldown and warm unconditionally on process start — e.g.
+right after fixing Databricks credentials, so the existing `.ldt_cache` is
+replaced immediately instead of waiting out the freshness window. Unset it
+again afterwards; left on, it forces a full Databricks rebuild on every
+worker's startup.
 
 ### 3.2 Unity Catalog tables
 
