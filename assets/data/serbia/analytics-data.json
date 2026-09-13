@@ -3,9 +3,9 @@
   "release": {
     "key": "srb-2025-v1",
     "year": 2025,
-    "adminFileName": "GPBP_LDT_SRB_admin_2.csv",
-    "scoreFileName": "GPBP_LDT_SRB_scores_admin_2.csv",
-    "geojsonFileName": "GPBP_LDT_SRB_admin_2_regions.json",
+    "adminFileName": "gpbp_ldt_srb_admin_2.csv",
+    "scoreFileName": "gpbp_ldt_srb_scores_admin_2.csv",
+    "geojsonFileName": "gpbp_ldt_srb_admin_2_regions.json",
     "indicatorWorkbookFileName": "indicators_table.xlsx"
   },
   "coverage": {

@@ -1,0 +1,327 @@
+{
+  "_comment": "Static PIL indicator metadata (labels, descriptions, direction, pillar, sources). Identical across Nepal/Serbia/Zambia; ported from wb-ldt-app indicators_table.xlsx via scripts/lib/nepal-data.mjs. Not read from Databricks.",
+  "indicatorDefinitions": [
+    {
+      "id": "accessibility-to-health-services",
+      "label": "Accessibility to Health Services (unit: %)",
+      "description": "Measures the percentage of citizens with healthcare access within a 5 km walking distance.",
+      "higherIsBetter": true,
+      "pillar": "infrastructure",
+      "sortOrder": 0,
+      "sources": [
+        {
+          "label": "OSM Openrouteservice",
+          "url": "https://wiki.openstreetmap.org/wiki/Openrouteservice"
+        },
+        {
+          "label": "WorldPop New Global 2 Population Data",
+          "url": "https://hub.worldpop.org/project/categories?id=3"
+        }
+      ]
+    },
+    {
+      "id": "accessibility-to-school-services",
+      "label": "Accessibility to School Services (unit: %)",
+      "description": "Measures the percentage of citizens with school access within a 5 km walking distance.",
+      "higherIsBetter": true,
+      "pillar": "infrastructure",
+      "sortOrder": 1,
+      "sources": [
+        {
+          "label": "OSM Openrouteservice",
+          "url": "https://wiki.openstreetmap.org/wiki/Openrouteservice"
+        },
+        {
+          "label": "WorldPop New Global 2 Population Data",
+          "url": "https://hub.worldpop.org/project/categories?id=3"
+        }
+      ]
+    },
+    {
+      "id": "nighttime-luminosity",
+      "label": "Nighttime Luminosity (unit: nWatts/(cm2 x sr)",
+      "description": "Measures artificial nighttime light as an measurement of both the degree of electrification and economic development indicator using NASA's Black Marble data.",
+      "higherIsBetter": true,
+      "pillar": "prosperity",
+      "sortOrder": 2,
+      "sources": [
+        {
+          "label": "VIIRS Nighttime Day/Night Band Composites Version 1",
+          "url": "https://developers.google.com/earth-engine/datasets/catalog/NOAA_VIIRS_DNB_MONTHLY_V1_VCMCFG"
+        }
+      ]
+    },
+    {
+      "id": "luminosity-per-capita",
+      "label": "Luminosity per Capita (unit: nWatts/(cm2 x sr x person))",
+      "description": "Nighttime Luminosity normalized to the region's Total Population.",
+      "higherIsBetter": true,
+      "pillar": "prosperity",
+      "sortOrder": 3,
+      "sources": [
+        {
+          "label": "VIIRS Nighttime Day/Night Band Composites Version 1",
+          "url": "https://developers.google.com/earth-engine/datasets/catalog/NOAA_VIIRS_DNB_MONTHLY_V1_VCMCFG"
+        },
+        {
+          "label": "WorldPop New Global 2 Population Data",
+          "url": "https://hub.worldpop.org/project/categories?id=3"
+        }
+      ]
+    },
+    {
+      "id": "luminosity-per-area",
+      "label": "Luminosity per Area (unit: nWatts/(cm2 x sr x km2))",
+      "description": "Nighttime Luminosity normalized to the region's Total Area.",
+      "higherIsBetter": true,
+      "pillar": "prosperity",
+      "sortOrder": 4,
+      "sources": [
+        {
+          "label": "VIIRS Nighttime Day/Night Band Composites Version 1",
+          "url": "https://developers.google.com/earth-engine/datasets/catalog/NOAA_VIIRS_DNB_MONTHLY_V1_VCMCFG"
+        },
+        {
+          "label": "GADM 4.1 Level 2 Boundaries",
+          "url": "https://gadm.org/"
+        }
+      ]
+    },
+    {
+      "id": "average-broadband-download-speed",
+      "label": "Average Broadband Download Speed (unit: megabites per second)",
+      "description": "Calculates the average broadband speed for key structures like schools and hospitals.",
+      "higherIsBetter": true,
+      "pillar": "infrastructure",
+      "sortOrder": 5,
+      "sources": [
+        {
+          "label": "Ookla Speedtest Global Performance",
+          "url": "https://registry.opendata.aws/speedtest-global-performance/"
+        },
+        {
+          "label": "OpenStreetMaps",
+          "url": "https://openstreetmap.org/"
+        }
+      ]
+    },
+    {
+      "id": "average-cellular-download-speed",
+      "label": "Average Cellular Download Speed (unit: megabites per second)",
+      "description": "Measures average mobile download speeds across sub-national regions.",
+      "higherIsBetter": true,
+      "pillar": "infrastructure",
+      "sortOrder": 6,
+      "sources": [
+        {
+          "label": "Ookla Speedtest Global Performance",
+          "url": "https://registry.opendata.aws/speedtest-global-performance/"
+        }
+      ]
+    },
+    {
+      "id": "key-structures-without-internet-access",
+      "label": "Key Structures without Internet Access (unit: %)",
+      "description": "Shows the percentage of hospitals and schools lacking broadband internet access.",
+      "higherIsBetter": false,
+      "pillar": "infrastructure",
+      "sortOrder": 7,
+      "sources": [
+        {
+          "label": "Ookla Speedtest Global Performance",
+          "url": "https://registry.opendata.aws/speedtest-global-performance/"
+        },
+        {
+          "label": "OpenStreetMaps",
+          "url": "https://openstreetmap.org/"
+        }
+      ]
+    },
+    {
+      "id": "road-flood-risk",
+      "label": "Road Flood Risk (unit: %)",
+      "description": "Assesses the share of the region's total length of railway exposure to 1-in-100-year flood risks for climate adaptation planning",
+      "higherIsBetter": false,
+      "pillar": "infrastructure",
+      "sortOrder": 8,
+      "sources": [
+        {
+          "label": "OpenStreetMaps",
+          "url": "https://openstreetmap.org/"
+        },
+        {
+          "label": "WRI Aqueduct Floods Hazard Maps Version 2",
+          "url": "https://developers.google.com/earth-engine/datasets/catalog/WRI_Aqueduct_Flood_Hazard_Maps_V2"
+        },
+        {
+          "label": "PIMxPAM Climate Risk Threshold Database",
+          "url": "https://gpbprtd.eu.pythonanywhere.com/"
+        }
+      ]
+    },
+    {
+      "id": "road-heatwave-risk",
+      "label": "Road Heatwave Risk (unit: %)",
+      "description": "Assesses the share of the region's total length of road exposure to 1-in-100-year flood risks for climate adaptation planning",
+      "higherIsBetter": false,
+      "pillar": "infrastructure",
+      "sortOrder": 9,
+      "sources": [
+        {
+          "label": "OpenStreetMaps",
+          "url": "https://openstreetmap.org/"
+        },
+        {
+          "label": "ERA5 Hourly Reanalysis",
+          "url": "https://cds.climate.copernicus.eu/datasets/reanalysis-era5-single-levels?tab=overview"
+        },
+        {
+          "label": "PIMxPAM Climate Risk Threshold Database",
+          "url": "https://gpbprtd.eu.pythonanywhere.com/"
+        }
+      ]
+    },
+    {
+      "id": "railway-flood-risk",
+      "label": "Railway Flood Risk (unit: %)",
+      "description": "Percentage of railway length at risk from 1-in-100-year flood risks for climate adaptation planning.",
+      "higherIsBetter": false,
+      "pillar": "infrastructure",
+      "sortOrder": 10,
+      "sources": [
+        {
+          "label": "OpenStreetMaps",
+          "url": "https://openstreetmap.org/"
+        },
+        {
+          "label": "WRI Aqueduct Floods Hazard Maps Version 2",
+          "url": "https://developers.google.com/earth-engine/datasets/catalog/WRI_Aqueduct_Flood_Hazard_Maps_V2"
+        },
+        {
+          "label": "PIMxPAM Climate Risk Threshold Database",
+          "url": "https://gpbprtd.eu.pythonanywhere.com/"
+        }
+      ]
+    },
+    {
+      "id": "railway-heatwave-risk",
+      "label": "Railway Heatwave Risk (unit: %)",
+      "description": "Measures road length at risk from heatwaves in high-emission climate scenarios",
+      "higherIsBetter": false,
+      "pillar": "infrastructure",
+      "sortOrder": 11,
+      "sources": [
+        {
+          "label": "OpenStreetMaps",
+          "url": "https://openstreetmap.org/"
+        },
+        {
+          "label": "ERA5 Hourly Reanalysis",
+          "url": "https://cds.climate.copernicus.eu/datasets/reanalysis-era5-single-levels?tab=overview"
+        },
+        {
+          "label": "PIMxPAM Climate Risk Threshold Database",
+          "url": "https://gpbprtd.eu.pythonanywhere.com/"
+        }
+      ]
+    },
+    {
+      "id": "pm-2-5-concentration",
+      "label": "PM 2.5 concentration (unit: µg/m3)",
+      "description": "Calculates average annual PM 2.5 concentration in sub-national regions, a key health risk factor.",
+      "higherIsBetter": false,
+      "pillar": "livability",
+      "sortOrder": 12,
+      "sources": [
+        {
+          "label": "OpenWeatherMaps Air Pollution",
+          "url": "https://openweathermap.org/api/air-pollution"
+        }
+      ]
+    },
+    {
+      "id": "co2-equivalent-emissions-per-area",
+      "label": "CO2-Equivalent Emissions per Area (unit: tonnes/km2)",
+      "description": "Total CO2-equivalent emissions from all sources in the region.",
+      "higherIsBetter": false,
+      "pillar": "livability",
+      "sortOrder": 13,
+      "sources": [
+        {
+          "label": "Climate Trace",
+          "url": "https://climatetrace.org/data"
+        }
+      ]
+    },
+    {
+      "id": "change-in-build-area",
+      "label": "Change in Build Area (%)",
+      "description": "Change detected in the amount of land use for man-made structures compared to 2017",
+      "higherIsBetter": true,
+      "pillar": "prosperity",
+      "sortOrder": 14,
+      "sources": [
+        {
+          "label": "Dynamic World V1",
+          "url": "https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_DYNAMICWORLD_V1"
+        }
+      ]
+    },
+    {
+      "id": "change-in-forest-area",
+      "label": "Change in Forest Area (%)",
+      "description": "Change detected in the amount of land use for forested area compared to 2017",
+      "higherIsBetter": true,
+      "pillar": "livability",
+      "sortOrder": 15,
+      "sources": [
+        {
+          "label": "Dynamic World V1",
+          "url": "https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_DYNAMICWORLD_V1"
+        }
+      ]
+    },
+    {
+      "id": "total-land-area-for-agricultural-use-km2",
+      "label": "Total Land Area for Agricultural Use (km2)",
+      "description": "Total area of land used for agricultural purposes",
+      "higherIsBetter": true,
+      "pillar": "prosperity",
+      "sortOrder": 16,
+      "sources": [
+        {
+          "label": "Dynamic World V1",
+          "url": "https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_DYNAMICWORLD_V1"
+        }
+      ]
+    },
+    {
+      "id": "number-of-tourism-pois",
+      "label": "Number of Tourism POIs",
+      "description": "Number of Points of Interests used for Tourism",
+      "higherIsBetter": true,
+      "pillar": "prosperity",
+      "sortOrder": 17,
+      "sources": [
+        {
+          "label": "OpenStreetMaps",
+          "url": "https://www.openstreetmap.org/#map=16/44.67174/20.15834"
+        }
+      ]
+    },
+    {
+      "id": "co2-equivalent-emissions-tonnes",
+      "label": "CO2-Equivalent Emissions (tonnes)",
+      "description": "Total CO2-Equivalent emissions for 100 years variant",
+      "higherIsBetter": false,
+      "pillar": "livability",
+      "sortOrder": 18,
+      "sources": [
+        {
+          "label": "Climate Trace",
+          "url": "https://climatetrace.org/data"
+        }
+      ]
+    }
+  ]
+}

@@ -19,6 +19,21 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# Load a local .env (next to this file) for development. On Posit Connect the
+# variables are set through the content's Vars pane and there is no .env, so a
+# missing file is fine. This is the first LDT module imported by both app.py
+# and queries.py, so doing it here covers every entry point.
+try:
+    from dotenv import load_dotenv
+
+    _dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if load_dotenv(_dotenv_path):
+        logger.info("Loaded environment from %s", _dotenv_path)
+    else:
+        load_dotenv()  # fall back to CWD / parent search
+except ImportError:  # pragma: no cover - python-dotenv is a listed dependency
+    logger.warning("python-dotenv not installed; reading environment from the shell only")
+
 # --------------------------------------------------------------------------
 # App-level metadata
 # --------------------------------------------------------------------------
@@ -1709,17 +1724,300 @@ TRANSLATION_STATUSES = [
 # --------------------------------------------------------------------------
 # Environment / configuration
 # --------------------------------------------------------------------------
+#
+# The Local Development Tracker reads every dataset live from Databricks
+# Unity Catalog (schema prd_mega.sgpbpi163). There is no bundled-data
+# fallback: queries.py raises EnvironmentError at import if any of the four
+# DATABRICKS_* variables is missing.
 
-SUPABASE_URL = os.environ.get("NEXT_PUBLIC_SUPABASE_URL", "")
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-EXA_API_KEY = os.environ.get("EXA_API_KEY", "")
-AI_GENERATION_ENABLED = os.environ.get("AI_GENERATION_ENABLED", "false").lower() == "true"
+DATABRICKS_SERVER_HOSTNAME = os.environ.get("DATABRICKS_SERVER_HOSTNAME", "")
+DATABRICKS_HTTP_PATH = os.environ.get("DATABRICKS_HTTP_PATH", "")
+DATABRICKS_CLIENT_ID = os.environ.get("DATABRICKS_CLIENT_ID", "")
+DATABRICKS_CLIENT_SECRET = os.environ.get("DATABRICKS_CLIENT_SECRET", "")
+
+LDT_CATALOG = os.environ.get("LDT_CATALOG", "prd_mega")
+LDT_SCHEMA = os.environ.get("LDT_SCHEMA", "sgpbpi163")
+LDT_DOCUMENTS_VOLUME = os.environ.get(
+    "LDT_DOCUMENTS_VOLUME",
+    "/Volumes/prd_mega/sgpbpi163/vgpbpi163/LDT/Local Development Plans",
+)
+
+QUERY_CACHE_TTL_SECONDS = int(os.environ.get("QUERY_CACHE_TTL_SECONDS", "300"))
+QUERY_CACHE_MAX_ENTRIES = int(os.environ.get("QUERY_CACHE_MAX_ENTRIES", "256"))
+
+REQUIRED_DATABRICKS_ENV = {
+    "DATABRICKS_SERVER_HOSTNAME": DATABRICKS_SERVER_HOSTNAME,
+    "DATABRICKS_HTTP_PATH": DATABRICKS_HTTP_PATH,
+    "DATABRICKS_CLIENT_ID": DATABRICKS_CLIENT_ID,
+    "DATABRICKS_CLIENT_SECRET": DATABRICKS_CLIENT_SECRET,
+}
 
 DEFAULT_MAP_METRIC_ID = "prosperity_score"
 DEFAULT_SCATTER_X_METRIC_ID = "infrastructure_score"
 DEFAULT_SCATTER_Y_METRIC_ID = "prosperity_score"
+
+
+# --------------------------------------------------------------------------
+# Analytics dataset assembly config (Python port of the constants that lived
+# in wb-ldt-app/scripts/lib/nepal-data.mjs, which generated the bundled JSON
+# snapshots from the source CSVs). queries.py now applies the same mapping to
+# rows read from Unity Catalog instead of CSV files.
+#
+# These are metadata, not data: they are static and identical across
+# countries, exactly as they were hard-coded upstream.
+# --------------------------------------------------------------------------
+
+import re as _re
+import unicodedata as _unicodedata
+
+
+def slugify(value: str) -> str:
+    """Port of the `slugify` helper in nepal-data.mjs."""
+    text = _unicodedata.normalize("NFKD", str(value))
+    text = "".join(ch for ch in text if not _unicodedata.combining(ch))
+    text = text.lower()
+    text = _re.sub(r"[^a-z0-9]+", "-", text)
+    return text.strip("-")
+
+
+def create_metric_id(label: str) -> str:
+    """Port of `createMetricId`: slugify then drop a trailing `-unit...` tail."""
+    return _re.sub(r"-unit(?:-[a-z0-9]+)*$", "", slugify(label))
+
+
+def create_score_metric_id(label: str) -> str:
+    """Port of `createScoreMetricId`: metric id with underscores."""
+    return create_metric_id(label).replace("-", "_")
+
+
+# Raw indicator column in GPBP_LDT_<ISO3>_admin_2  ->  canonical indicator label
+# (which must equal an `indicatorDefinitions[].label` in
+# assets/data/indicator_definitions.json).
+ADMIN_CANONICAL_MAPPINGS = {
+    "Accessibility to Hospitals (%)": "Accessibility to Health Services (unit: %)",
+    "Accessibility to Schools (%)": "Accessibility to School Services (unit: %)",
+    "Average Broadband Internet Download Speed (Mbps)":
+        "Average Broadband Download Speed (unit: megabites per second)",
+    "Average Mobile Internet Download Speed (Mbps)":
+        "Average Cellular Download Speed (unit: megabites per second)",
+    "Key Structures without Access to Broadband Internet (%)":
+        "Key Structures without Internet Access (unit: %)",
+    "Average PM25 Concentration (ug/m3)": "PM 2.5 concentration (unit: µg/m3)",
+    "C02 Emissions per Area (tonnes/km2)":
+        "CO2-Equivalent Emissions per Area (unit: tonnes/km2)",
+    "CO2-Equivalent Emissions (tonnes)": "CO2-Equivalent Emissions (tonnes)",
+    "Change in Build Area (%)": "Change in Build Area (%)",
+    "Change in Forest Area (%)": "Change in Forest Area (%)",
+    "Total Land Area for Agricultural Use (km2)":
+        "Total Land Area for Agricultural Use (km2)",
+    "Number of Tourism POIs": "Number of Tourism POIs",
+    "Nighttime Luminosity": "Nighttime Luminosity (unit: nWatts/(cm2 x sr)",
+    "Luminosity per Capita": "Luminosity per Capita (unit: nWatts/(cm2 x sr x person))",
+    "Luminosity per Area": "Luminosity per Area (unit: nWatts/(cm2 x sr x km2))",
+    "Road Flood Risk (%)": "Road Flood Risk (unit: %)",
+    "Road Heatwave Risk (%)": "Road Heatwave Risk (unit: %)",
+    "Railway Flood Risk (%)": "Railway Flood Risk (unit: %)",
+    "Railway Heatwave Risk (%)": "Railway Heatwave Risk (unit: %)",
+}
+
+# Raw score column in GPBP_LDT_<ISO3>_scores_admin_2  ->  canonical score label.
+SCORE_CANONICAL_MAPPINGS = {
+    "Broadband Internet Score": "Broadband Internet Score",
+    "Mobile Internet Score": "Mobile Internet Score",
+    "Key Structure Internet Access Score": "Key Structure Internet Access Score",
+    "Accessibility to Hospitals Score": "Accessibility to Hospitals Score",
+    "Accessibility to Schools Score": "Accessibility to Schools Score",
+    "Railway Heatwave Score": "Railway Heatwave Score",
+    "Road Heatwave Score": "Road Heatwave Score",
+    "Road Flood Score": "Road Flood Score",
+    "Railway Flood Score": "Railway Flood Score",
+    "Emissions Normalized Score": "Emissions per Area Score",
+    "Air Quality Score": "Air Quality Score",
+    "Deforestation Score": "Deforestation Score",
+    "Emissions Score": "Emissions Score",
+    "Luminosity per Capita Score": "Luminosity per Capita Score",
+    "Luminosity per Area Score": "Luminosity per Area Score",
+    "Built Area Development Score": "Built Area Development Score",
+    "Tourism Score": "Tourism Score",
+    "Agricultural Land Score": "Agricultural Land Score",
+    "Infrastructure Score": "Infrastructure Score",
+    "Livability Score": "Livability Score",
+    "Prosperity Score": "Prosperity Score",
+}
+
+# Context columns in the admin table -> key in `municipality.context`.
+CONTEXT_COLUMN_MAPPINGS = {
+    "Population": "population",
+    "Total Land Area (km2)": "totalLandAreaKm2",
+    "Total Road Length (km)": "totalRoadLengthKm",
+    "Total Railway Length (km)": "totalRailwayLengthKm",
+    "Road Flood Risk (km)": "roadFloodRiskKm",
+    "Road Heatwave Risk (km)": "roadHeatwaveRiskKm",
+    "Railway Flood Risk (km)": "railwayFloodRiskKm",
+    "Railway Heatwave Risk (km)": "railwayHeatwaveRiskKm",
+}
+
+# The three pillar scores and their component labels (order matters - it is
+# the display order of the waterfall rows).
+SCORE_DEFINITIONS = [
+    {
+        "id": "infrastructure_score",
+        "label": "Infrastructure Score",
+        "pillar": "infrastructure",
+        "componentLabels": [
+            "Broadband Internet Score",
+            "Mobile Internet Score",
+            "Key Structure Internet Access Score",
+            "Accessibility to Hospitals Score",
+            "Accessibility to Schools Score",
+        ],
+    },
+    {
+        "id": "livability_score",
+        "label": "Livability Score",
+        "pillar": "livability",
+        "componentLabels": [
+            "Emissions Score",
+            "Air Quality Score",
+            "Deforestation Score",
+            "Emissions per Area Score",
+            "Railway Heatwave Score",
+            "Road Heatwave Score",
+            "Road Flood Score",
+            "Railway Flood Score",
+        ],
+    },
+    {
+        "id": "prosperity_score",
+        "label": "Prosperity Score",
+        "pillar": "prosperity",
+        "componentLabels": [
+            "Luminosity per Capita Score",
+            "Luminosity per Area Score",
+            "Built Area Development Score",
+            "Tourism Score",
+            "Agricultural Land Score",
+        ],
+    },
+]
+
+PILLAR_SCORE_LABELS = {d["label"] for d in SCORE_DEFINITIONS}
+
+# --------------------------------------------------------------------------
+# Per-country Unity Catalog data sources.
+#
+# `admin_columns` / `boundary_columns` name the hierarchy columns *inside*
+# each table and mirror the country-specific mapping from nepal-data.mjs.
+# `*_candidates` lists are tried, in order, with tolerant (case- and
+# punctuation-insensitive) matching so a minor rename in Unity Catalog does
+# not break the join - run scripts/introspect_databricks.py and adjust the
+# exact names here if the tolerant match is not enough.
+# --------------------------------------------------------------------------
+# prefer wkt
+COUNTRY_DATA_SOURCES = {
+    "NPL": {
+        "release_key_prefix": "npl",
+        "admin_table": "ldt_gpbp_ldt_npl_admin_2_demo",
+        "scores_table": "ldt_gpbp_ldt_npl_scores_admin_2_demo",
+        "boundary_table": "ldt_boundaries_admin2_nepal",
+        "year_column": "Year",
+        "year_column_candidates": ["Year", "year", "release_year", "data_year"],
+        "admin_columns": {
+            "municipality": "Municipality",
+            "district": "District",
+            "province": "Province",
+        },
+        "boundary_columns": {
+            "municipality": "Municipality",
+            "district": "District",
+            "province": "Province",
+        },
+        "boundary_municipality_candidates": [
+            "Municipality", "NAM_2", "ADM2_EN", "admin2", "shapeName", "name_2", "NAME_2",
+        ],
+        "boundary_district_candidates": [
+            "District", "NAM_1", "ADM1_EN", "admin1", "name_1", "NAME_1",
+        ],
+        "boundary_province_candidates": [
+            "Province", "NAM_1", "ADM1_EN", "admin1", "name_1", "NAME_1",
+        ],
+        "geometry_column_candidates": [
+            "geometry_wkt", "geometry_wkb", "geometry", "geom", "wkt", "geojson", "shape",
+        ],
+        "boundary_crs": "EPSG:4326",
+        "simplify_tolerance": 0.0008,
+        "documents_subdir": "Nepal",
+    },
+    "ZMB": {
+        "release_key_prefix": "zmb",
+        "admin_table": "ldt_gpbp_ldt_zmb_admin_2_demo",
+        "scores_table": "ldt_gpbp_ldt_zmb_scores_admin_2_demo",
+        "boundary_table": "ldt_boundaries_admin2_zambia",
+        "year_column": "Year",
+        "year_column_candidates": ["Year", "year", "release_year", "data_year"],
+        "admin_columns": {
+            "municipality": "District",
+            "district": "Province",
+            "province": "Province",
+        },
+        "boundary_columns": {
+            "municipality": "NAM_2",
+            "district": "NAM_1",
+            "province": "NAM_1",
+        },
+        "boundary_municipality_candidates": [
+            "NAM_2", "ADM2_EN", "admin2", "shapeName", "Municipality", "name_2", "NAME_2",
+        ],
+        "boundary_district_candidates": [
+            "NAM_1", "ADM1_EN", "admin1", "District", "name_1", "NAME_1",
+        ],
+        "boundary_province_candidates": [
+            "NAM_1", "ADM1_EN", "admin1", "Province", "name_1", "NAME_1",
+        ],
+        "geometry_column_candidates": [
+            "geometry_wkt", "geometry_wkb", "geometry", "geom", "wkt", "geojson", "shape",
+        ],
+        "boundary_crs": "EPSG:4326",
+        "simplify_tolerance": 0.0008,
+        "documents_subdir": "Zambia",
+        "expected_lsg_count": 116,
+    },
+    "SRB": {
+        "release_key_prefix": "srb",
+        "admin_table": "ldt_gpbp_ldt_srb_admin_2_demo",
+        "scores_table": "ldt_gpbp_ldt_srb_scores_admin_2_demo",
+        "boundary_table": "ldt_boundaries_admin2_serbia",
+        "year_column": "Year",
+        "year_column_candidates": ["Year", "year", "release_year", "data_year"],
+        "admin_columns": {
+            "municipality": "District",
+            "district": "Province",
+            "province": "Province",
+        },
+        "boundary_columns": {
+            "municipality": "Municipality",
+            "district": "District",
+            "province": "District",
+        },
+        "boundary_municipality_candidates": [
+            "Municipality", "ADM2_EN", "admin2", "shapeName", "NAM_2", "name_2", "NAME_2",
+        ],
+        "boundary_district_candidates": [
+            "District", "ADM1_EN", "admin1", "NAM_1", "name_1", "NAME_1",
+        ],
+        "boundary_province_candidates": [
+            "District", "ADM1_EN", "admin1", "NAM_1", "name_1", "NAME_1",
+        ],
+        "geometry_column_candidates": [
+            "geometry_wkt", "geometry_wkb", "geometry", "geom", "wkt", "geojson", "shape",
+        ],
+        "boundary_crs": "EPSG:4326",
+        "simplify_tolerance": 0.0008,
+        "documents_subdir": "Serbia",
+        "expected_lsg_count": 161,
+    },
+}
+
 
 logger.info(
     "Loaded LDT constants for %s countries and %s readiness categories.",

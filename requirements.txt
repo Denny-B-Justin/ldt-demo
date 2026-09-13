@@ -19,4 +19,17 @@ pandas
 numpy
 gunicorn
 python-dotenv
-supabase
+
+# --- Databricks Unity Catalog data source ---
+# The datasets originate in prd_mega.sgpbpi163 (OAuth service principal) and
+# are assembled into on-disk artifacts by datastore.warm(); see README s.3.
+databricks-sql-connector
+databricks-sdk
+# pyarrow enables the connector's Arrow / CloudFetch result path, which is
+# markedly faster for the wide full-table reads warm() does. The code falls
+# back to the row API if it is absent, but keep it installed in deployments.
+pyarrow
+
+# Geometry decode/simplify for the choropleth boundaries stored in UC.
+shapely
+pyproj
