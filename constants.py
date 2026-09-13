@@ -1913,7 +1913,7 @@ PILLAR_SCORE_LABELS = {d["label"] for d in SCORE_DEFINITIONS}
 # not break the join - run scripts/introspect_databricks.py and adjust the
 # exact names here if the tolerant match is not enough.
 # --------------------------------------------------------------------------
-
+# prefer wkt
 COUNTRY_DATA_SOURCES = {
     "NPL": {
         "release_key_prefix": "npl",
