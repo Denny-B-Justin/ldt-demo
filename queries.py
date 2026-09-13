@@ -3,39 +3,33 @@ queries.py
 ================
 Data access layer for the Local Development Tracker.
 
-Mirrors the query layer that lived in the Next.js app's
-`src/lib/data/queries.ts`, `src/lib/country-landing-data.ts`, and
-`src/lib/strategy-inventory/source.ts`.
+Every analytical dataset is read **live from Databricks Unity Catalog**
+(schema ``prd_mega.sgpbpi163``) through an OAuth service principal. There is
+no bundled-data fallback - if the ``DATABRICKS_*`` environment variables are
+not configured this module raises ``EnvironmentError`` at import time.
 
-Data source strategy (same as the original app)
--------------------------------------------------
-1. **Primary source: Supabase.** If `NEXT_PUBLIC_SUPABASE_URL` and
-   `SUPABASE_SERVICE_ROLE_KEY` are configured (see `.example.env`), this
-   module opens a `supabase-py` client against the `analytics` schema and
-   reads the same tables the Next.js app used:
-       - analytics.dataset_releases
-       - analytics.municipalities
-       - analytics.score_definitions
-       - analytics.score_components
-       - analytics.indicators / analytics.indicator_sources
-       - analytics.municipality_score_values
-       - analytics.municipality_indicator_values
-       - analytics.municipality_score_component_values
-       - analytics.municipality_context_values
-       - analytics.municipality_boundaries
-       - analytics.strategy_inventory_documents
-2. **Fallback source: bundled JSON.** If Supabase is not configured, or a
-   table/query fails, the app falls back to the generated JSON snapshots
-   that ship in `assets/data/<country>/analytics-data.json` and
-   `assets/data/<country>/municipalities.geojson` (the same generated
-   files the Next.js app bundled under `src/generated/` and
-   `public/data/`). This keeps the app fully functional out of the box,
-   even with no database configured, which matters for a Posit Connect
-   deployment that may not have outbound DB access provisioned yet.
+Source tables
+-------------
+Per country (``NPL`` / ``SRB`` / ``ZMB``):
 
-All heavy reads are memoized with `functools.lru_cache` (the Python
-equivalent of the `react`-package `cache()` wrapper used upstream) so a
-single Dash worker process only reads each JSON file once.
+* ``GPBP_LDT_<ISO3>_admin_2``          - indicator panel, one row per
+  municipality-year, raw indicator + context columns.
+* ``GPBP_LDT_<ISO3>_scores_admin_2``   - 0-100 percentile score panel, one
+  row per municipality-year, component + pillar score columns.
+* ``ldt_boundaries_admin2_<country>``  - admin-2 geometry for the choropleth.
+
+The Strategy Inventory page is built from the planning-documents Volume at
+``LDT_DOCUMENTS_VOLUME`` (default
+``/Volumes/prd_mega/sgpbpi163/vgpbpi163/LDT/Local Development Plans``).
+
+The row -> ``analytics-data.json`` shaping mirrors, function for function,
+``wb-ldt-app/scripts/lib/nepal-data.mjs`` which produced the JSON snapshots
+the app used before this migration, so every downstream pure function
+(score averages, province summaries, waterfalls, ...) is unchanged.
+
+Static indicator metadata (labels, descriptions, direction, pillar, sources)
+is identical across the three countries and is shipped in
+``assets/data/indicator_definitions.json`` rather than a table.
 """
 
 from __future__ import annotations
@@ -43,99 +37,175 @@ from __future__ import annotations
 import json
 import logging
 import os
-from functools import lru_cache
-from typing import Any, Dict, List, Optional
+import re
+import threading
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+import pandas as pd
 
 import constants
 
 logger = logging.getLogger(__name__)
 
-try:
-    from supabase import create_client, Client  # type: ignore
-except Exception:  # pragma: no cover - supabase-py is an optional dependency
-    create_client = None
-    Client = None
+try:  # enables the fast Arrow / CloudFetch result path in execute_query()
+    import pyarrow as _pyarrow  # noqa: F401
+
+    _HAS_PYARROW = True
+except Exception:  # noqa: BLE001
+    _HAS_PYARROW = False
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+INDICATOR_DEFINITIONS_PATH = os.path.join(ASSETS_DIR, "data", "indicator_definitions.json")
 
 
 # --------------------------------------------------------------------------
-# Supabase client
+# Environment guard - fail fast, exactly like the sample Databricks project
 # --------------------------------------------------------------------------
 
-@lru_cache(maxsize=1)
-def get_supabase_client() -> Optional["Client"]:
-    """Return a cached Supabase client, or None if not configured."""
-    if create_client is None:
-        logger.warning("Supabase client library is unavailable; falling back to bundled JSON data.")
-        return None
-    if not constants.SUPABASE_URL or not constants.SUPABASE_SERVICE_ROLE_KEY:
-        logger.info("Supabase credentials are not configured; using local JSON fallback.")
-        return None
-    try:
-        client = create_client(constants.SUPABASE_URL, constants.SUPABASE_SERVICE_ROLE_KEY)
-        logger.info("Supabase connection initialized successfully.")
-        return client
-    except Exception:
-        logger.exception("Supabase initialization failed; falling back to bundled JSON data.")
-        return None
+_missing_env = [k for k, v in constants.REQUIRED_DATABRICKS_ENV.items() if not v]
+if _missing_env:
+    raise EnvironmentError(
+        "\n\nThe Local Development Tracker reads all data from Databricks Unity "
+        "Catalog and has no offline fallback.\n\nMissing required environment "
+        "variables:\n"
+        + "\n".join(f"  {k}" for k in _missing_env)
+        + "\n\nCopy .env.sample to .env and fill in:\n"
+        "  DATABRICKS_SERVER_HOSTNAME=adb-xxxx.azuredatabricks.net\n"
+        "  DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/abc123\n"
+        "  DATABRICKS_CLIENT_ID=your-service-principal-client-id\n"
+        "  DATABRICKS_CLIENT_SECRET=your-service-principal-secret\n"
+    )
 
 
-def supabase_available() -> bool:
-    return get_supabase_client() is not None
+def credentials_provider():
+    """OAuth2 service-principal credentials for the Databricks SQL connector."""
+    from databricks.sdk.core import Config, oauth_service_principal
 
-
-# --------------------------------------------------------------------------
-# Local JSON fallback loaders
-# --------------------------------------------------------------------------
-
-@lru_cache(maxsize=None)
-def load_local_analytics_fallback(country_code: str) -> Dict[str, Any]:
-    """Load the generated analytics-data.json fallback for a country."""
-    country = constants.COUNTRY_BY_CODE.get(country_code, constants.DEFAULT_COUNTRY)
-    file_path = os.path.join(ASSETS_DIR, country["fallback_data_path"])
-    try:
-        with open(file_path, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        logger.exception("Could not load analytics fallback for %s from %s.", country_code, file_path)
-        raise
-
-
-@lru_cache(maxsize=None)
-def load_map_feature_collection(country_code: str) -> Dict[str, Any]:
-    """Load the municipality boundary GeoJSON for a country."""
-    country = constants.COUNTRY_BY_CODE.get(country_code, constants.DEFAULT_COUNTRY)
-    file_path = os.path.join(ASSETS_DIR, country["map_data_path"])
-    try:
-        with open(file_path, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        logger.exception("Could not load map GeoJSON for %s from %s.", country_code, file_path)
-        raise
-
-
-@lru_cache(maxsize=None)
-def load_strategy_inventory_fallback(country_code: str) -> Optional[Dict[str, Any]]:
-    """Load the sample/fallback strategy inventory dataset for a country."""
-    country = constants.COUNTRY_BY_CODE.get(country_code)
-    if not country or not country.get("strategy_inventory_path"):
-        logger.info("No strategy inventory fallback defined for country %s.", country_code)
-        return None
-    file_path = os.path.join(ASSETS_DIR, country["strategy_inventory_path"])
-    if not os.path.exists(file_path):
-        logger.warning("Strategy inventory fallback file missing for %s: %s", country_code, file_path)
-        return None
-    try:
-        with open(file_path, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        logger.exception("Could not load strategy inventory fallback for %s from %s.", country_code, file_path)
-        return None
+    config = Config(
+        host=f"https://{constants.DATABRICKS_SERVER_HOSTNAME}",
+        client_id=constants.DATABRICKS_CLIENT_ID,
+        client_secret=constants.DATABRICKS_CLIENT_SECRET,
+    )
+    return oauth_service_principal(config)
 
 
 # --------------------------------------------------------------------------
-# Small numeric helpers (ports of the pure functions in queries.ts)
+# QueryService - singleton SQL executor with an in-memory TTL cache
+# (ported from the sample queries.py the user supplied)
+# --------------------------------------------------------------------------
+
+class QueryService:
+    """Thread-safe data-access object with a TTL query cache."""
+
+    _instance: Optional["QueryService"] = None
+    _instance_lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls) -> "QueryService":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+
+    def __init__(self) -> None:
+        # {sql_string: (expires_at_epoch, dataframe)}
+        self._cache: Dict[str, Tuple[float, pd.DataFrame]] = {}
+        self._lock = threading.Lock()
+
+    # -- cache helpers ----------------------------------------------------
+
+    def _cache_get(self, key: str) -> Optional[pd.DataFrame]:
+        now = time.time()
+        with self._lock:
+            entry = self._cache.get(key)
+            if not entry:
+                return None
+            expires_at, df = entry
+            if now >= expires_at:
+                del self._cache[key]
+                return None
+            return df
+
+    def _cache_set(self, key: str, df: pd.DataFrame) -> None:
+        expires_at = time.time() + constants.QUERY_CACHE_TTL_SECONDS
+        with self._lock:
+            if len(self._cache) >= constants.QUERY_CACHE_MAX_ENTRIES:
+                oldest = next(iter(self._cache))
+                del self._cache[oldest]
+            self._cache[key] = (expires_at, df)
+
+    def clear_cache(self) -> None:
+        with self._lock:
+            self._cache.clear()
+        logger.info("Query cache cleared")
+
+    def invalidate_query(self, query: str) -> None:
+        with self._lock:
+            removed = self._cache.pop(query, None) is not None
+        if removed:
+            logger.info("Invalidated cache for query: %s", query[:80])
+
+    # -- executor -------------------------------------------------------
+
+    def execute_query(self, query: str) -> pd.DataFrame:
+        """Run ``query`` against Databricks SQL and return a DataFrame.
+
+        Results are cached in memory for ``QUERY_CACHE_TTL_SECONDS`` seconds.
+        """
+        cached = self._cache_get(query)
+        if cached is not None:
+            logger.info("CACHE HIT (TTL=%ss): %s", constants.QUERY_CACHE_TTL_SECONDS, _one_line(query))
+            return cached.copy(deep=True)
+
+        from databricks import sql
+
+        t0 = time.time()
+        logger.info("Databricks query: %s", _one_line(query))
+        with sql.connect(
+            server_hostname=constants.DATABRICKS_SERVER_HOSTNAME,
+            http_path=constants.DATABRICKS_HTTP_PATH,
+            credentials_provider=credentials_provider,
+        ) as conn:
+            cursor = conn.cursor()
+            cursor.execute(query)
+            # Arrow -> pandas (and CloudFetch) is markedly faster than
+            # materialising Row objects for the wide full-table reads this app
+            # does. Only try it when pyarrow is actually available, so the
+            # cursor is never left half-consumed by a failed attempt.
+            if _HAS_PYARROW:
+                df = cursor.fetchall_arrow().to_pandas()
+            else:
+                rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description]
+                df = pd.DataFrame(rows, columns=columns)
+
+        logger.info(
+            "Databricks query returned %d rows x %d cols in %.2fs: %s",
+            len(df), len(df.columns), time.time() - t0, _one_line(query),
+        )
+        self._cache_set(query, df)
+        return df.copy(deep=True)
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())[:160]
+
+
+def execute_query(query: str) -> pd.DataFrame:
+    """Module-level convenience wrapper around the singleton executor."""
+    return QueryService.get_instance().execute_query(query)
+
+
+def _fqtn(table: str) -> str:
+    """Fully-qualified, back-tick-quoted table name."""
+    return f"`{constants.LDT_CATALOG}`.`{constants.LDT_SCHEMA}`.`{table}`"
+
+
+# --------------------------------------------------------------------------
+# Small numeric helpers (ports of the pure functions in nepal-data.mjs /
+# the previous queries.py - unchanged behaviour)
 # --------------------------------------------------------------------------
 
 def _finite(values):
@@ -171,105 +241,602 @@ def normalize_land_area_km2(value: Optional[float]) -> Optional[float]:
     return round(value, 2)
 
 
-# --------------------------------------------------------------------------
-# Supabase table readers (used opportunistically when configured; falls
-# back silently to the local JSON snapshot on any error, matching the
-# `isMissingRelationError` guard behaviour in the original queries.ts)
-# --------------------------------------------------------------------------
-
-def _try_supabase_table(table: str, builder=None, country_code: Optional[str] = None):
-    client = get_supabase_client()
-    if client is None:
+def _to_number(value) -> Optional[float]:
+    """Port of `toNumber`: tolerant numeric parse, ``None`` on failure."""
+    if value is None:
         return None
     try:
-        query = client.schema("analytics").table(table).select("*")
-        if country_code is not None:
-            query = query.eq("country_code", country_code)
-        if builder is not None:
-            query = builder(query)
-        response = query.execute()
-        logger.debug("Loaded %s rows from Supabase table %s for country %s.", len(response.data), table, country_code)
-        return response.data
-    except Exception:
-        logger.exception("Supabase query failed for table %s (country=%s).", table, country_code)
+        if isinstance(value, float) and value != value:  # NaN
+            return None
+    except TypeError:
+        pass
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).replace(",", "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
         return None
 
 
+def _clean_label(value) -> str:
+    return "" if value is None else str(value).strip()
+
+
 # --------------------------------------------------------------------------
-# Analytics page data assembly
+# Tolerant column resolution
 # --------------------------------------------------------------------------
 
-def get_analytics_dataset(country_code: str) -> Dict[str, Any]:
-    """
-    Return the fully-assembled analytics dataset for a country.
+def _norm_col(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(name).lower())
 
-    This mirrors the *shape* of `AnalyticsDataset` from `types/analytics.ts`.
-    The generated JSON snapshot already contains fully joined/derived
-    scores, indicators, and province summaries (it was produced by the
-    same pipeline that feeds Supabase upstream), so it is used directly
-    as the analytical source of truth. If Supabase is configured, live
-    score/indicator values for the *active* release are overlaid on top
-    of the municipality roster on a best-effort basis; any failure
-    silently keeps the JSON fallback values, exactly like the original
-    Next.js `queries.ts` fallback strategy.
-    """
-    logger.debug("Loading analytics dataset for country %s.", country_code)
-    dataset = load_local_analytics_fallback(country_code)
 
-    if supabase_available():
+def _resolve_column(columns, candidates, *, table: str = "", role: str = "") -> Optional[str]:
+    """Return the actual column in ``columns`` that best matches ``candidates``.
+
+    Tries exact match, then case-/punctuation-insensitive match.
+    """
+    if isinstance(candidates, str):
+        candidates = [candidates]
+    normalized = {_norm_col(c): c for c in columns}
+    for cand in candidates:
+        if cand in columns:
+            return cand
+        hit = normalized.get(_norm_col(cand))
+        if hit is not None:
+            return hit
+    if role:
+        logger.warning(
+            "%s: could not resolve %s column from candidates %s (available: %s)",
+            table, role, list(candidates), list(columns),
+        )
+    return None
+
+
+# --------------------------------------------------------------------------
+# Static definitions
+# --------------------------------------------------------------------------
+
+_definitions_lock = threading.Lock()
+_indicator_definitions_cache: Optional[List[Dict[str, Any]]] = None
+
+
+def _indicator_definitions() -> List[Dict[str, Any]]:
+    global _indicator_definitions_cache
+    if _indicator_definitions_cache is None:
+        with _definitions_lock:
+            if _indicator_definitions_cache is None:
+                with open(INDICATOR_DEFINITIONS_PATH, "r", encoding="utf-8") as fh:
+                    payload = json.load(fh)
+                _indicator_definitions_cache = payload["indicatorDefinitions"]
+                logger.info(
+                    "Loaded %d static indicator definitions from %s",
+                    len(_indicator_definitions_cache), INDICATOR_DEFINITIONS_PATH,
+                )
+    return _indicator_definitions_cache
+
+
+def _score_definitions() -> List[Dict[str, Any]]:
+    result = []
+    for index, item in enumerate(constants.SCORE_DEFINITIONS):
+        result.append({
+            "id": item["id"],
+            "label": item["label"],
+            "pillar": item["pillar"],
+            "componentLabels": list(item["componentLabels"]),
+            "sortOrder": index,
+            "componentIds": [
+                constants.create_score_metric_id(label) for label in item["componentLabels"]
+            ],
+        })
+    return result
+
+
+# --------------------------------------------------------------------------
+# Geometry decode (WKT / WKB / GeoJSON) -> simplified GeoJSON dict
+# --------------------------------------------------------------------------
+
+def _decode_geometry(value):
+    """Return a shapely geometry from a UC boundary column value, or None."""
+    if value is None:
+        return None
+    from shapely import wkb as shp_wkb
+    from shapely import wkt as shp_wkt
+    from shapely.geometry import shape as shp_shape
+
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return shp_wkb.loads(bytes(value))
+
+    text = str(value).strip()
+    if not text:
+        return None
+    if text[0] in "{[":
+        return shp_shape(json.loads(text))
+
+    lowered = text.lower()
+    if (
+        len(lowered) > 16
+        and len(lowered) % 2 == 0
+        and all(ch in "0123456789abcdef" for ch in lowered)
+    ):
         try:
-            _overlay_supabase_scores(country_code, dataset)
-        except Exception:
-            logger.exception("Supabase overlay failed for analytics dataset %s; keeping bundled JSON values.", country_code)
+            return shp_wkb.loads(bytes.fromhex(lowered))
+        except Exception:  # noqa: BLE001 - fall through to WKT
+            pass
+    return shp_wkt.loads(text)
 
+
+def _reproject(geom, source_crs: str):
+    if not source_crs or source_crs.upper() in ("EPSG:4326", "4326", "WGS84"):
+        return geom
+    try:
+        from pyproj import Transformer
+        from shapely.ops import transform as shp_transform
+    except ImportError:
+        logger.warning(
+            "Boundary CRS is %s but pyproj is not installed; leaving coordinates "
+            "unprojected. `pip install pyproj` to fix.", source_crs,
+        )
+        return geom
+    transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
+    return shp_transform(lambda x, y, z=None: transformer.transform(x, y), geom)
+
+
+def _geometry_to_geojson(geom, tolerance: float) -> Optional[Dict[str, Any]]:
+    from shapely.geometry import mapping
+
+    if geom is None or geom.is_empty:
+        return None
+    if tolerance:
+        simplified = geom.simplify(tolerance, preserve_topology=True)
+        if simplified is not None and not simplified.is_empty:
+            geom = simplified
+    return mapping(geom)
+
+
+# --------------------------------------------------------------------------
+# Dataset assembler (port of buildCountryAnalyticsData)
+# --------------------------------------------------------------------------
+
+_dataset_lock = threading.Lock()
+_dataset_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_feature_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_strategy_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+
+def _country_config(country_code: str) -> Dict[str, Any]:
+    code = (country_code or "NPL").upper()
+    if code not in constants.COUNTRY_DATA_SOURCES:
+        # allow slugs too
+        for c in constants.COUNTRIES:
+            if c["slug"] == (country_code or "").lower():
+                code = c["code"]
+                break
+    return constants.COUNTRY_DATA_SOURCES[code]
+
+
+def _hierarchy(row: pd.Series, columns: Dict[str, str]) -> Dict[str, str]:
+    municipality = _clean_label(row.get(columns["municipality"]))
+    province = _clean_label(row.get(columns["province"]))
+    district = _clean_label(row.get(columns["district"])) or province
+    return {"municipality": municipality, "district": district, "province": province}
+
+
+def _composite_key(hierarchy: Dict[str, str]) -> str:
+    return "::".join([hierarchy["province"], hierarchy["district"], hierarchy["municipality"]])
+
+
+def _project_municipality(
+    country_code: str,
+    admin_row: pd.Series,
+    score_row: Optional[pd.Series],
+    admin_columns: Dict[str, str],
+    indicator_col_map: Dict[str, str],
+    score_col_map: Dict[str, str],
+    context_col_map: Dict[str, str],
+    indicator_definitions: List[Dict[str, Any]],
+    score_definitions: List[Dict[str, Any]],
+    year_column: Optional[str],
+) -> Dict[str, Any]:
+    hierarchy = _hierarchy(admin_row, admin_columns)
+    definitions_by_label = {d["label"]: d for d in indicator_definitions}
+    pillar_labels = constants.PILLAR_SCORE_LABELS
+
+    indicators: Dict[str, Any] = {}
+    for raw_column, canonical_label in constants.ADMIN_CANONICAL_MAPPINGS.items():
+        definition = definitions_by_label.get(canonical_label)
+        actual = indicator_col_map.get(raw_column)
+        if definition is None or actual is None:
+            continue
+        indicators[definition["id"]] = _to_number(admin_row.get(actual))
+
+    score_components: Dict[str, Any] = {}
+    scores: Dict[str, Any] = {}
+    for raw_column, canonical_label in constants.SCORE_CANONICAL_MAPPINGS.items():
+        actual = score_col_map.get(raw_column)
+        value = _to_number(score_row.get(actual)) if (score_row is not None and actual) else None
+        metric_id = constants.create_score_metric_id(canonical_label)
+        if canonical_label in pillar_labels:
+            scores[metric_id] = value
+        elif canonical_label.endswith("Score"):
+            score_components[metric_id] = value
+
+    context: Dict[str, Any] = {}
+    for raw_column, key in constants.CONTEXT_COLUMN_MAPPINGS.items():
+        actual = context_col_map.get(raw_column)
+        context[key] = _to_number(admin_row.get(actual)) if actual else None
+
+    year_value = admin_row.get(year_column) if year_column else None
+    year = int(_to_number(year_value)) if _to_number(year_value) is not None else None
+
+    return {
+        "id": constants.slugify(
+            f"{country_code}-{hierarchy['province']}-{hierarchy['district']}-{hierarchy['municipality']}"
+        ),
+        "municipality": hierarchy["municipality"],
+        "district": hierarchy["district"],
+        "province": hierarchy["province"],
+        "compositeKey": _composite_key(hierarchy),
+        "slug": {
+            "municipality": constants.slugify(hierarchy["municipality"]),
+            "district": constants.slugify(hierarchy["district"]),
+            "province": constants.slugify(hierarchy["province"]),
+        },
+        "year": year,
+        "mapAvailable": False,
+        "indicators": indicators,
+        "scoreComponents": score_components,
+        "scores": scores,
+        "context": context,
+    }
+
+
+def _build_national_averages(municipalities, indicator_definitions, score_definitions):
+    return {
+        "indicators": {
+            d["id"]: average([m["indicators"].get(d["id"]) for m in municipalities])
+            for d in indicator_definitions
+        },
+        "scores": {
+            d["id"]: average([m["scores"].get(d["id"]) for m in municipalities])
+            for d in score_definitions
+        },
+    }
+
+
+def _build_province_summary(municipalities, score_definitions):
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for m in municipalities:
+        grouped.setdefault(m["province"], []).append(m)
+    result = []
+    for province, rows in grouped.items():
+        result.append({
+            "province": province,
+            "municipalityCount": len(rows),
+            "averageScores": {
+                d["id"]: average([r["scores"].get(d["id"]) for r in rows])
+                for d in score_definitions
+            },
+        })
+    return sorted(result, key=lambda r: r["province"])
+
+
+def _build_release(config: Dict[str, Any], year: Optional[int]) -> Dict[str, Any]:
+    return {
+        "key": f"{config['release_key_prefix']}-{year}-v1",
+        "year": year,
+        "adminTable": config["admin_table"],
+        "scoreTable": config["scores_table"],
+        "boundaryTable": config["boundary_table"],
+        "catalog": constants.LDT_CATALOG,
+        "schema": constants.LDT_SCHEMA,
+    }
+
+
+def _assemble_dataset(country_code: str) -> Dict[str, Any]:
+    config = _country_config(country_code)
+    code = country_code.upper()
+    admin_columns = config["admin_columns"]
+
+    admin_fqtn = _fqtn(config["admin_table"])
+    scores_fqtn = _fqtn(config["scores_table"])
+
+    logger.info(
+        "Assembling %s analytics dataset from %s.%s (%s + %s)",
+        code, constants.LDT_CATALOG, constants.LDT_SCHEMA,
+        config["admin_table"], config["scores_table"],
+    )
+
+    admin_df = execute_query(f"SELECT * FROM {admin_fqtn}")
+    scores_df = execute_query(f"SELECT * FROM {scores_fqtn}")
+
+    if admin_df.empty:
+        raise RuntimeError(f"{admin_fqtn} returned no rows - cannot build {code} dataset")
+
+    admin_cols = list(admin_df.columns)
+    score_cols = list(scores_df.columns)
+
+    year_column = _resolve_column(
+        admin_cols, config["year_column_candidates"], table=config["admin_table"], role="year"
+    )
+    score_year_column = _resolve_column(
+        score_cols, config["year_column_candidates"], table=config["scores_table"], role="year"
+    )
+
+    # Resolve every raw source column once, tolerantly.
+    indicator_col_map = {
+        raw: _resolve_column(admin_cols, [raw])
+        for raw in constants.ADMIN_CANONICAL_MAPPINGS
+    }
+    context_col_map = {
+        raw: _resolve_column(admin_cols, [raw])
+        for raw in constants.CONTEXT_COLUMN_MAPPINGS
+    }
+    score_col_map = {
+        raw: _resolve_column(score_cols, [raw])
+        for raw in constants.SCORE_CANONICAL_MAPPINGS
+    }
+    _log_unresolved(config["admin_table"], "indicator", indicator_col_map)
+    _log_unresolved(config["admin_table"], "context", context_col_map)
+    _log_unresolved(config["scores_table"], "score", score_col_map)
+
+    admin_hierarchy_cols = {
+        role: _resolve_column(admin_cols, [name], table=config["admin_table"], role=f"admin.{role}") or name
+        for role, name in admin_columns.items()
+    }
+    score_hierarchy_cols = {
+        role: _resolve_column(score_cols, [name], table=config["scores_table"], role=f"scores.{role}") or name
+        for role, name in admin_columns.items()
+    }
+
+    indicator_definitions = _indicator_definitions()
+    score_definitions = _score_definitions()
+
+    # Score lookup keyed by "Year::Province::District::Municipality".
+    score_lookup: Dict[str, pd.Series] = {}
+    for _, row in scores_df.iterrows():
+        hierarchy = _hierarchy(row, score_hierarchy_cols)
+        year_val = _to_number(row.get(score_year_column)) if score_year_column else None
+        year_token = str(int(year_val)) if year_val is not None else ""
+        score_lookup[f"{year_token}::{_composite_key(hierarchy)}"] = row
+
+    municipalities = []
+    for _, admin_row in admin_df.iterrows():
+        hierarchy = _hierarchy(admin_row, admin_hierarchy_cols)
+        year_val = _to_number(admin_row.get(year_column)) if year_column else None
+        year_token = str(int(year_val)) if year_val is not None else ""
+        score_row = score_lookup.get(f"{year_token}::{_composite_key(hierarchy)}")
+        municipalities.append(
+            _project_municipality(
+                code, admin_row, score_row, admin_hierarchy_cols,
+                indicator_col_map, score_col_map, context_col_map,
+                indicator_definitions, score_definitions, year_column,
+            )
+        )
+
+    years = sorted({m["year"] for m in municipalities if m["year"] is not None})
+    latest_year = years[-1] if years else None
+    latest = [m for m in municipalities if m["year"] == latest_year] or municipalities
+
+    national_averages = _build_national_averages(municipalities, indicator_definitions, score_definitions)
+    province_summary = _build_province_summary(latest, score_definitions)
+
+    metrics = [
+        {"id": d["id"], "label": d["label"], "kind": "score", "pillar": d["pillar"]}
+        for d in score_definitions
+    ] + [
+        {
+            "id": d["id"], "label": d["label"], "kind": "indicator",
+            "pillar": d.get("pillar"), "higherIsBetter": d.get("higherIsBetter"),
+        }
+        for d in indicator_definitions
+    ]
+
+    dataset = {
+        "generatedAt": pd.Timestamp.utcnow().isoformat(),
+        "release": _build_release(config, latest_year),
+        "coverage": {
+            "analyticsMunicipalityCount": len(latest),
+            "mapMunicipalityCount": 0,  # filled lazily by load_map_feature_collection
+            "analyticsOnlyCount": 0,
+            "boundaryOnlyCount": 0,
+        },
+        "metricIds": {
+            "defaultMapMetricId": constants.DEFAULT_MAP_METRIC_ID,
+            "defaultScatterXMetricId": constants.DEFAULT_SCATTER_X_METRIC_ID,
+            "defaultScatterYMetricId": constants.DEFAULT_SCATTER_Y_METRIC_ID,
+        },
+        "provinces": sorted({m["province"] for m in municipalities if m["province"]}),
+        "years": years,
+        "indicatorDefinitions": indicator_definitions,
+        "scoreDefinitions": score_definitions,
+        "metrics": metrics,
+        "nationalAverages": national_averages,
+        "provinceSummary": province_summary,
+        "municipalities": municipalities,
+        "mapFeatureKeys": [],
+    }
+    logger.info(
+        "%s dataset assembled: %d municipality-year rows, %d in latest year %s, %d provinces, years=%s",
+        code, len(municipalities), len(latest), latest_year, len(dataset["provinces"]), years,
+    )
     return dataset
 
 
-def _overlay_supabase_scores(country_code: str, dataset: Dict[str, Any]) -> None:
-    """Best-effort overlay of live Supabase score values onto the fallback dataset."""
-    client = get_supabase_client()
-    if client is None:
-        return
+def _log_unresolved(table: str, role: str, col_map: Dict[str, Optional[str]]) -> None:
+    unresolved = [raw for raw, actual in col_map.items() if actual is None]
+    if unresolved:
+        logger.warning("%s: %d %s columns not found: %s", table, len(unresolved), role, unresolved)
 
-    releases = _try_supabase_table(
-        "dataset_releases",
-        builder=lambda q: q.eq("country_code", country_code).order("year"),
+
+# --------------------------------------------------------------------------
+# Boundary features (port of buildCountryMatchedGeojson)
+# --------------------------------------------------------------------------
+
+def _assemble_feature_collection(country_code: str) -> Dict[str, Any]:
+    config = _country_config(country_code)
+    code = country_code.upper()
+    table = config["boundary_table"]
+    fqtn = _fqtn(table)
+
+    logger.info(
+        "Fetching %s admin-2 boundaries from %s.%s.%s",
+        code, constants.LDT_CATALOG, constants.LDT_SCHEMA, table,
     )
-    if not releases:
-        return
+    df = execute_query(f"SELECT * FROM {fqtn}")
+    if df.empty:
+        logger.warning("%s returned no rows - the %s map will be empty", fqtn, code)
+        return {"type": "FeatureCollection", "features": []}
 
-    active = next((r for r in releases if r.get("is_active")), releases[-1])
-    release_id = active["id"]
-    year = active["year"]
+    columns = list(df.columns)
+    muni_col = _resolve_column(columns, config["boundary_municipality_candidates"], table=table, role="boundary.municipality")
+    dist_col = _resolve_column(columns, config["boundary_district_candidates"], table=table, role="boundary.district")
+    prov_col = _resolve_column(columns, config["boundary_province_candidates"], table=table, role="boundary.province")
+    geom_col = _resolve_column(columns, config["geometry_column_candidates"], table=table, role="geometry")
 
-    score_rows = _try_supabase_table(
-        "municipality_score_values",
-        builder=lambda q: q.eq("release_id", release_id).eq("year", year),
+    if not (muni_col and prov_col and geom_col):
+        raise RuntimeError(
+            f"{fqtn}: could not resolve boundary columns "
+            f"(municipality={muni_col}, district={dist_col}, province={prov_col}, geometry={geom_col}). "
+            f"Available columns: {columns}. Adjust COUNTRY_DATA_SOURCES['{code}'] in constants.py."
+        )
+    logger.info(
+        "%s boundary columns resolved: municipality=%s district=%s province=%s geometry=%s",
+        code, muni_col, dist_col, prov_col, geom_col,
     )
-    if not score_rows:
-        return
 
-    scores_by_municipality: Dict[str, Dict[str, Any]] = {}
-    for row in score_rows:
-        scores_by_municipality.setdefault(row["municipality_id"], {})[row["score_id"]] = row["score_value"]
+    boundary_columns = {
+        "municipality": muni_col,
+        "district": dist_col or prov_col,
+        "province": prov_col,
+    }
+    tolerance = config.get("simplify_tolerance", 0.0)
+    crs = config.get("boundary_crs", "EPSG:4326")
 
-    municipalities = _try_supabase_table(
-        "municipalities", builder=lambda q: q.eq("country_code", country_code)
-    )
-    if not municipalities:
-        return
-
-    by_composite_key = {m["composite_key"]: m for m in municipalities}
-
-    for record in dataset.get("municipalities", []):
-        supa_row = by_composite_key.get(record.get("compositeKey"))
-        if not supa_row:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    decode_failures = 0
+    for _, row in df.iterrows():
+        hierarchy = _hierarchy(row, boundary_columns)
+        key = _composite_key(hierarchy)
+        try:
+            geom = _decode_geometry(row.get(geom_col))
+        except Exception:  # noqa: BLE001
+            decode_failures += 1
             continue
-        live_scores = scores_by_municipality.get(supa_row["id"])
-        if live_scores:
-            record["scores"].update(live_scores)
-            logger.debug("Updated live scores for %s municipality in %s.", record.get("municipality"), country_code)
+        if geom is None or geom.is_empty:
+            continue
+        geom = _reproject(geom, crs)
+        entry = grouped.setdefault(key, {"hierarchy": hierarchy, "geoms": []})
+        entry["geoms"].append(geom)
 
+    if decode_failures:
+        logger.warning("%s: %d boundary rows failed geometry decode", code, decode_failures)
+
+    from shapely.ops import unary_union
+
+    features = []
+    for key, entry in grouped.items():
+        geoms = entry["geoms"]
+        merged = geoms[0] if len(geoms) == 1 else unary_union(geoms)
+        geojson_geom = _geometry_to_geojson(merged, tolerance)
+        if geojson_geom is None:
+            continue
+        h = entry["hierarchy"]
+        features.append({
+            "type": "Feature",
+            "properties": {
+                "Municipality": h["municipality"],
+                "District": h["district"],
+                "Province": h["province"],
+                "compositeKey": key,
+            },
+            "geometry": geojson_geom,
+        })
+
+    logger.info("%s boundary feature collection built: %d features", code, len(features))
+    return {"type": "FeatureCollection", "features": features}
+
+
+# --------------------------------------------------------------------------
+# Pluggable data providers
+# --------------------------------------------------------------------------
+#
+# By default the assemblers below read straight from Databricks. ``datastore``
+# imports this module and calls ``set_data_providers()`` to swap in
+# filesystem-cached, request-safe versions, so that web requests never block
+# on a live query. The test-suite never imports ``datastore``, so it keeps the
+# direct-from-Databricks behaviour (backed by the monkeypatched executor).
+
+_ANALYTICS_PROVIDER = _assemble_dataset
+_FEATURE_PROVIDER = _assemble_feature_collection
+_STRATEGY_PROVIDER = None  # falls back to _build_strategy_inventory (defined below)
+
+
+def set_data_providers(analytics=None, features=None, strategy=None) -> None:
+    """Override the functions used to obtain assembled datasets."""
+    global _ANALYTICS_PROVIDER, _FEATURE_PROVIDER, _STRATEGY_PROVIDER
+    if analytics is not None:
+        _ANALYTICS_PROVIDER = analytics
+    if features is not None:
+        _FEATURE_PROVIDER = features
+    if strategy is not None:
+        _STRATEGY_PROVIDER = strategy
+    clear_caches()
+
+
+# --------------------------------------------------------------------------
+# Cached public accessors
+# --------------------------------------------------------------------------
+
+def _cached(cache: Dict[str, Tuple[float, Any]], key: str, builder):
+    now = time.time()
+    with _dataset_lock:
+        entry = cache.get(key)
+        if entry and now < entry[0]:
+            return entry[1]
+    value = builder(key)
+    with _dataset_lock:
+        cache[key] = (time.time() + constants.QUERY_CACHE_TTL_SECONDS, value)
+    return value
+
+
+def get_analytics_dataset(country_code: str) -> Dict[str, Any]:
+    """Return the fully-assembled analytics dataset for a country (cached)."""
+    return _cached(_dataset_cache, country_code.upper(), _ANALYTICS_PROVIDER)
+
+
+def load_map_feature_collection(country_code: str) -> Dict[str, Any]:
+    """Return the admin-2 boundary GeoJSON FeatureCollection for a country."""
+    fc = _cached(_feature_cache, country_code.upper(), _FEATURE_PROVIDER)
+    # Backfill map coverage onto the (separately cached) dataset. When the
+    # datastore provides the dataset it has already done this, so skip.
+    dataset = _dataset_cache.get(country_code.upper())
+    if dataset and not dataset[1].get("mapFeatureKeys"):
+        keys = {f["properties"]["compositeKey"] for f in fc.get("features", [])}
+        analytics_keys = {m["compositeKey"] for m in dataset[1]["municipalities"]}
+        matched = keys & analytics_keys
+        dataset[1]["coverage"]["mapMunicipalityCount"] = len(matched)
+        dataset[1]["coverage"]["boundaryOnlyCount"] = len(keys - analytics_keys)
+        dataset[1]["mapFeatureKeys"] = sorted(matched)
+        for m in dataset[1]["municipalities"]:
+            m["mapAvailable"] = m["compositeKey"] in matched
+    return fc
+
+
+def clear_caches() -> None:
+    with _dataset_lock:
+        _dataset_cache.clear()
+        _feature_cache.clear()
+        _strategy_cache.clear()
+    QueryService.get_instance().clear_cache()
+    logger.info("All LDT caches cleared")
+
+
+# --------------------------------------------------------------------------
+# Derived accessors (unchanged ports)
+# --------------------------------------------------------------------------
 
 def get_years(country_code: str) -> List[int]:
     return get_analytics_dataset(country_code).get("years", [])
@@ -462,13 +1029,18 @@ def get_analytics_page_data(
     metric_id: Optional[str] = None,
     x_metric_id: Optional[str] = None,
     y_metric_id: Optional[str] = None,
+    sections: Optional[set] = None,
 ) -> Dict[str, Any]:
+    """Single dict bundling everything the analytics page needs.
+
+    ``sections`` limits which (expensive) blocks are actually computed:
+    ``{"map"}``, ``{"scatter2d"}``, ``{"scatter3d"}``, ``{"drivers"}`` or any
+    combination. ``None`` (default) builds everything -- backwards compatible.
+    Pass ``set()`` for just the filter/selection metadata (the fast first
+    paint of the analytics page). The unbuilt blocks are still present in the
+    result, just empty.
     """
-    The Python equivalent of `getAnalyticsPageData` in the original
-    `src/lib/data/queries.ts`. Returns a single dict bundling everything
-    the analytics page needs: filters, selected records, map features,
-    scatter points, score-driver rows, and waterfall groups.
-    """
+    want = {"map", "scatter2d", "scatter3d", "drivers"} if sections is None else set(sections)
     dataset = get_analytics_dataset(country_code)
     country = constants.COUNTRY_BY_CODE.get(country_code, constants.DEFAULT_COUNTRY)
 
@@ -504,84 +1076,96 @@ def get_analytics_page_data(
     if selected_municipality is None:
         selected_municipality = municipalities_for_year[0]
 
-    # Map features
-    feature_collection = load_map_feature_collection(country_code)
-    by_composite_key = {m["compositeKey"]: m for m in municipalities_for_year}
-    map_features = []
-    for feature in feature_collection.get("features", []):
-        composite_key = feature["properties"].get("compositeKey")
-        municipality = by_composite_key.get(composite_key)
-        if municipality is None:
-            continue
-        if selected_province != "all" and feature["properties"].get("Province") != selected_province:
-            continue
-        value = get_metric_value(municipality, selected_metric)
-        map_features.append({
-            "type": feature["type"],
-            "properties": feature["properties"],
-            "geometry": feature["geometry"],
-            "metricValue": value,
-        })
-
-    metric_summary = build_metric_summary(province_filtered, selected_metric)
-
     score_definitions = get_score_definitions(country_code)
     indicator_definitions = get_indicator_definitions(country_code)
     indicator_by_id = {d["id"]: d for d in indicator_definitions}
     selected_score_definition = infer_score_definition(score_definitions, selected_metric)
-    national_component_averages = build_national_component_averages(municipalities_for_year)
 
-    score_component_definitions = []
-    score_driver_rows = []
-    for index, component_id in enumerate(selected_score_definition["componentIds"]):
-        label = (
-            selected_score_definition["componentLabels"][index]
-            if index < len(selected_score_definition["componentLabels"])
-            else component_id
-        )
-        score_component_definitions.append({"id": component_id, "label": label, "description": None})
-        municipality_value = selected_municipality["scoreComponents"].get(component_id)
-        national_value = national_component_averages.get(component_id)
-        delta = None
-        if municipality_value is not None and national_value is not None:
-            delta = round(municipality_value - national_value, 2)
-        score_driver_rows.append({
-            "componentId": component_id,
-            "label": label,
-            "municipalityValue": municipality_value,
-            "nationalValue": national_value,
-            "delta": delta,
-        })
+    # -- Map features (the single most expensive block: iterates the whole
+    #    boundary FeatureCollection and carries its geometry) ---------------
+    map_features: List[Dict[str, Any]] = []
+    mapped_keys: set = set()
+    metric_summary: Dict[str, Optional[float]] = {"minimum": None, "maximum": None, "average": None}
+    if "map" in want:
+        feature_collection = load_map_feature_collection(country_code)
+        by_composite_key = {m["compositeKey"]: m for m in municipalities_for_year}
+        for feature in feature_collection.get("features", []):
+            composite_key = feature["properties"].get("compositeKey")
+            municipality = by_composite_key.get(composite_key)
+            if municipality is None:
+                continue
+            mapped_keys.add(composite_key)
+            if selected_province != "all" and feature["properties"].get("Province") != selected_province:
+                continue
+            value = get_metric_value(municipality, selected_metric)
+            map_features.append({
+                "type": feature["type"],
+                "properties": feature["properties"],
+                "geometry": feature["geometry"],
+                "metricValue": value,
+            })
+        metric_summary = build_metric_summary(province_filtered, selected_metric)
+    else:
+        mapped_keys = set(dataset.get("mapFeatureKeys", []))
 
-    waterfalls = build_score_waterfalls(country_code, selected_municipality, municipalities_for_year)
-    province_summary = build_province_summary(country_code, municipalities_for_year)
+    # -- Score-driver / waterfall block ----------------------------------
+    score_component_definitions: List[Dict[str, Any]] = []
+    score_driver_rows: List[Dict[str, Any]] = []
+    waterfalls: List[Dict[str, Any]] = []
+    if "drivers" in want:
+        national_component_averages = build_national_component_averages(municipalities_for_year)
+        for index, component_id in enumerate(selected_score_definition["componentIds"]):
+            label = (
+                selected_score_definition["componentLabels"][index]
+                if index < len(selected_score_definition["componentLabels"])
+                else component_id
+            )
+            score_component_definitions.append({"id": component_id, "label": label, "description": None})
+            municipality_value = selected_municipality["scoreComponents"].get(component_id)
+            national_value = national_component_averages.get(component_id)
+            delta = None
+            if municipality_value is not None and national_value is not None:
+                delta = round(municipality_value - national_value, 2)
+            score_driver_rows.append({
+                "componentId": component_id,
+                "label": label,
+                "municipalityValue": municipality_value,
+                "nationalValue": national_value,
+                "delta": delta,
+            })
+        waterfalls = build_score_waterfalls(country_code, selected_municipality, municipalities_for_year)
+
+    province_summary = build_province_summary(country_code, municipalities_for_year) if "drivers" in want else []
 
     scatter2d_points = []
-    for m in province_filtered:
-        scatter2d_points.append({
-            "id": m["id"],
-            "label": m["municipality"],
-            "district": m["district"],
-            "province": m["province"],
-            "x": m["scores"].get(selected_x_metric["id"]),
-            "y": m["scores"].get(selected_y_metric["id"]),
-            "selected": m["id"] == selected_municipality["id"],
-        })
+    if "scatter2d" in want:
+        for m in province_filtered:
+            scatter2d_points.append({
+                "id": m["id"],
+                "label": m["municipality"],
+                "district": m["district"],
+                "province": m["province"],
+                "x": m["scores"].get(selected_x_metric["id"]),
+                "y": m["scores"].get(selected_y_metric["id"]),
+                "selected": m["id"] == selected_municipality["id"],
+            })
 
     scatter3d_points = []
-    for m in province_filtered:
-        scatter3d_points.append({
-            "id": m["id"],
-            "label": m["municipality"],
-            "district": m["district"],
-            "province": m["province"],
-            "x": m["scores"].get("prosperity_score"),
-            "y": m["scores"].get("infrastructure_score"),
-            "z": m["scores"].get("livability_score"),
-            "selected": m["id"] == selected_municipality["id"],
-        })
+    if "scatter3d" in want:
+        for m in province_filtered:
+            scatter3d_points.append({
+                "id": m["id"],
+                "label": m["municipality"],
+                "district": m["district"],
+                "province": m["province"],
+                "x": m["scores"].get("prosperity_score"),
+                "y": m["scores"].get("infrastructure_score"),
+                "z": m["scores"].get("livability_score"),
+                "selected": m["id"] == selected_municipality["id"],
+            })
 
-    coverage = dataset.get("coverage", {})
+    coverage = dict(dataset.get("coverage", {}))
+    coverage["mapMunicipalityCount"] = len(mapped_keys)
 
     return {
         "country": {"code": country["code"], "slug": country["slug"], "name": country["name"]},
@@ -608,7 +1192,7 @@ def get_analytics_page_data(
             "metric": selected_metric,
             "features": map_features,
             "summary": metric_summary,
-            "coverageLabel": f"{coverage.get('mapMunicipalityCount', 0)} mapped of {len(municipalities_for_year)} analytics municipalities",
+            "coverageLabel": f"{len(mapped_keys)} mapped of {len(municipalities_for_year)} analytics municipalities",
         },
         "scatter2d": {"xMetric": selected_x_metric, "yMetric": selected_y_metric, "points": scatter2d_points},
         "scatter3d": {"points": scatter3d_points},
@@ -639,7 +1223,6 @@ def get_methodology_data(country_code: str = None) -> Dict[str, Any]:
 # --------------------------------------------------------------------------
 
 def load_country_dataset(country_code: str) -> Dict[str, Any]:
-    """Equivalent of `loadCountryDataset` from country-landing-data.ts."""
     return get_analytics_dataset(country_code)
 
 
@@ -649,8 +1232,8 @@ def sum_finite(values) -> float:
 
 def build_country_home_model(country: Dict[str, Any], dataset: Dict[str, Any]) -> Dict[str, Any]:
     """Port of `buildCountryHomeModel` from country-home.ts."""
-    release_year = dataset.get("release", {}).get("year", 0)
-    years = dataset.get("years", [release_year])
+    release_year = dataset.get("release", {}).get("year", 0) or 0
+    years = dataset.get("years", [release_year]) or [release_year]
     latest_year = max([release_year] + list(years))
 
     rows = [m for m in dataset["municipalities"] if m["year"] == latest_year]
@@ -738,37 +1321,158 @@ def get_plan_availability_disclosure(country: Dict[str, Any]) -> Dict[str, str]:
 
 
 # --------------------------------------------------------------------------
-# Strategy inventory
+# Strategy inventory - built from the planning-documents Volume
 # --------------------------------------------------------------------------
 
-def get_strategy_inventory_dataset(country_code: str) -> Optional[Dict[str, Any]]:
-    """
-    Load the strategy inventory dataset for a country. Tries Supabase's
-    `analytics.strategy_inventory_documents` table first; falls back to
-    the bundled sample JSON (matching `strategy-inventory/source.ts`).
-    """
+_DOC_TYPE_KEYWORDS = {
+    "strategy": ("strategy", "strategij", "strateg", "development plan", "ldp", "plan of development"),
+    "budget": ("budget", "budzet", "buxhet", "financ"),
+    "plan": ("plan", "programme", "program"),
+}
+_LANGUAGE_TOKENS = {
+    "en": {"en", "eng", "english"},
+    "sr": {"sr", "srp", "srb", "serbian", "srpski", "lat", "cyr"},
+    "ne": {"ne", "np", "npl", "nep", "nepali"},
+}
+
+
+def _workspace_client():
+    from databricks.sdk import WorkspaceClient
+    from databricks.sdk.core import Config
+
+    # Bound the Volume Files API calls so an unreachable / slow workspace can
+    # never wedge the caller (the strategy-inventory build, or the background
+    # warm) indefinitely. These are Config attributes, not WorkspaceClient
+    # kwargs, so they have to go through an explicit Config.
+    timeout = float(os.environ.get("LDT_WORKSPACE_HTTP_TIMEOUT_SECONDS", "20"))
+    retry_budget = int(os.environ.get("LDT_WORKSPACE_RETRY_TIMEOUT_SECONDS", "40"))
+    config = Config(
+        host=f"https://{constants.DATABRICKS_SERVER_HOSTNAME}",
+        client_id=constants.DATABRICKS_CLIENT_ID,
+        client_secret=constants.DATABRICKS_CLIENT_SECRET,
+        http_timeout_seconds=timeout,
+        retry_timeout_seconds=retry_budget,
+    )
+    return WorkspaceClient(config=config)
+
+
+def _list_volume_tree(root: str, max_depth: int = 4) -> List[Dict[str, Any]]:
+    """Flat list of files under ``root``: [{path, name, parent, size}]."""
+    client = _workspace_client()
+    files: List[Dict[str, Any]] = []
+
+    def _walk(path: str, depth: int) -> None:
+        if depth > max_depth:
+            return
+        try:
+            entries = list(client.files.list_directory_contents(path))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Cannot list volume path %s: %s", path, exc)
+            return
+        for entry in entries:
+            entry_path = (entry.path or "").rstrip("/")
+            name = entry_path.split("/")[-1]
+            if entry.is_directory:
+                _walk(entry_path, depth + 1)
+            else:
+                files.append({
+                    "path": entry_path,
+                    "name": name,
+                    "parent": entry_path.rsplit("/", 1)[0].split("/")[-1],
+                    "size": getattr(entry, "file_size", None),
+                })
+
+    _walk(root.rstrip("/"), 0)
+    return files
+
+
+def _classify_document(name: str) -> Dict[str, Any]:
+    lowered = name.lower()
+    doc_type = "other"
+    for candidate, keywords in _DOC_TYPE_KEYWORDS.items():
+        if any(k in lowered for k in keywords):
+            doc_type = candidate
+            break
+
+    years = [int(y) for y in re.findall(r"(?:19|20)\d{2}", name)]
+    publication_year = max(years) if years else None
+
+    stem = lowered.rsplit(".", 1)[0] if "." in lowered else lowered
+    tokens = set(re.split(r"[^a-z0-9]+", stem))
+    language = "unknown"
+    for lang, markers in _LANGUAGE_TOKENS.items():
+        if tokens & markers:
+            language = lang
+            break
+
+    ext = lowered.rsplit(".", 1)[-1] if "." in lowered else ""
+    parsing_status = "parsed" if ext in ("pdf", "docx", "doc", "txt", "md") else "needs_review"
+
+    return {
+        "document_type": doc_type,
+        "publication_year": publication_year,
+        "language": language,
+        "parsing_status": parsing_status,
+        "file_extension": ext,
+    }
+
+
+def _build_strategy_inventory(country_code: str) -> Optional[Dict[str, Any]]:
     country = constants.COUNTRY_BY_CODE.get(country_code)
     if not country or country["slug"] not in constants.STRATEGY_INVENTORY_SLUGS:
         return None
 
-    supabase_rows = _try_supabase_table(
-        "strategy_inventory_documents",
-        builder=lambda q: q.eq("is_active", True),
-        country_code=country_code,
-    )
+    config = _country_config(country_code)
+    subdir = config.get("documents_subdir", country["name"])
+    root = f"{constants.LDT_DOCUMENTS_VOLUME.rstrip('/')}/{subdir}"
 
-    if supabase_rows:
-        return {
+    logger.info("Building %s strategy inventory from volume %s", country_code, root)
+    files = _list_volume_tree(root)
+    logger.info("%s strategy inventory: %d document files found under %s", country_code, len(files), root)
+
+    records: List[Dict[str, Any]] = []
+    for f in files:
+        if f["name"].startswith(".") or f["size"] in (0, None) and f["name"].lower() in ("readme", "readme.md"):
+            continue
+        meta = _classify_document(f["name"])
+        lsg_name = f["parent"] or country["name"]
+        records.append({
             "country_code": country_code,
-            "country_name": country["name"],
-            "is_sample_data": False,
-            "expected_lsg_count": len(supabase_rows),
-            "last_updated": max((r.get("last_updated") or "" for r in supabase_rows), default=""),
-            "summary_override": None,
-            "records": supabase_rows,
-        }
+            "lsg_id": constants.slugify(f"{country_code}-{lsg_name}"),
+            "lsg_name": lsg_name,
+            "region_name": "",
+            "document_type": meta["document_type"],
+            "document_title": os.path.splitext(f["name"])[0],
+            "publication_year": meta["publication_year"],
+            "source_url": f["path"],
+            "source_status": "found",
+            "language": meta["language"],
+            "translation_status": "unknown",
+            "parsing_status": meta["parsing_status"],
+            "ai_ready": meta["parsing_status"] == "parsed",
+            "notes": None,
+            "last_updated": None,
+        })
 
-    return load_strategy_inventory_fallback(country_code)
+    expected = config.get("expected_lsg_count") or len({r["lsg_name"] for r in records}) or 1
+    return {
+        "country_code": country_code,
+        "country_name": country["name"],
+        "is_sample_data": False,
+        "expected_lsg_count": expected,
+        "last_updated": None,
+        "summary_override": None,
+        "records": records,
+    }
+
+
+def get_strategy_inventory_dataset(country_code: str) -> Optional[Dict[str, Any]]:
+    """Load the strategy inventory for a country from the documents Volume."""
+    country = constants.COUNTRY_BY_CODE.get(country_code)
+    if not country or country["slug"] not in constants.STRATEGY_INVENTORY_SLUGS:
+        return None
+    provider = _STRATEGY_PROVIDER or _build_strategy_inventory
+    return _cached(_strategy_cache, country_code.upper(), lambda _k: provider(country_code))
 
 
 def get_readiness_category(record: Dict[str, Any]) -> str:

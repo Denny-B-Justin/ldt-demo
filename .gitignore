@@ -1,3 +1,12 @@
 __pycache__/
+*.pyc
 .venv/
 .env
+.pytest_cache/
+.coverage
+htmlcov/
+scratchpad/
+
+# Runtime-refreshed data artifacts (rebuilt on startup / by the refresh route).
+# The *shipped* snapshot in assets/data/_snapshot/ is committed instead.
+.ldt_cache/
