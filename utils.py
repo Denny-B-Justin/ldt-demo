@@ -311,7 +311,7 @@ def build_choropleth_figure(
     zmax = maximum if maximum is not None and maximum > (minimum or 0) else zmin + 1
 
     fig = go.Figure(
-        go.Choroplethmap(
+        go.Choroplethmapbox(
             geojson=geojson,
             locations=location_ids,
             z=values,
