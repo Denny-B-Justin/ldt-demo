@@ -271,7 +271,7 @@ def build_choropleth_figure(
     dark: bool = False,
 ) -> go.Figure:
     """
-    Renders the municipality choropleth using Plotly's Choroplethmapbox,
+    Renders the municipality choropleth using Plotly's Choroplethmap,
     replicating the min -> max color ramp used by the MapLibre version
     (`#e5ebf8` -> `#3675b7`, with `#e7e7e7` for missing data).
     """
@@ -311,7 +311,7 @@ def build_choropleth_figure(
     zmax = maximum if maximum is not None and maximum > (minimum or 0) else zmin + 1
 
     fig = go.Figure(
-        go.Choroplethmapbox(
+        go.Choroplethmap(
             geojson=geojson,
             locations=location_ids,
             z=values,
