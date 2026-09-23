@@ -357,6 +357,26 @@ def _apply_map_coverage(dataset: Dict[str, Any], fc: Dict[str, Any]) -> None:
         m["mapAvailable"] = m["compositeKey"] in matched
 
 
+def _bundled_map_match_count(code: str) -> int:
+    """How many municipalities the *shipped* (bundled) analytics + boundary
+    files match for `code`. Used as a quality floor: warm() reads this
+    straight off disk (never through the cache-first accessors) so it stays
+    a stable baseline that a live Databricks fetch has to clear before it's
+    allowed to replace what's already being served."""
+    analytics_path = _bundled_analytics_path(code)
+    boundary_path = _bundled_boundary_path(code)
+    if not analytics_path or not boundary_path:
+        return 0
+    try:
+        dataset = _read_json_maybe_gz(analytics_path)
+        fc = _read_json_maybe_gz(boundary_path)
+        boundary_keys = {f["properties"]["compositeKey"] for f in fc.get("features", [])}
+        analytics_keys = {m["compositeKey"] for m in dataset.get("municipalities", [])}
+        return len(boundary_keys & analytics_keys)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 # --------------------------------------------------------------------------
 # warm() -- the one place Databricks is read
 # --------------------------------------------------------------------------
@@ -379,6 +399,7 @@ def warm(force: bool = False) -> Dict[str, Any]:
         os.makedirs(CACHE_DIR, exist_ok=True)
         built: List[str] = []
         failed: Dict[str, str] = {}
+        regressed: Dict[str, str] = {}
         for country in constants.COUNTRIES:
             code = country["code"]
             logger.info("warm(): assembling %s", code)
@@ -397,6 +418,30 @@ def warm(force: bool = False) -> Dict[str, Any]:
                 dataset = queries._assemble_dataset(code)
                 fc = queries._assemble_feature_collection(code)
                 _apply_map_coverage(dataset, fc)
+
+                # Quality gate: a live fetch can succeed (no exception) and
+                # still be *worse* data than what's already shipped -- e.g.
+                # Nepal's live boundary table currently only has district-
+                # level rows, so it joins to zero of the 728 municipalities
+                # the analytics tables report. Publishing that over the
+                # bundled 751-municipality boundaries would silently regress
+                # a working map to a blank one on every warm() cycle. Refuse
+                # the publish when coverage would drop to zero and a shipped
+                # baseline proves better data exists; keep serving whatever
+                # is already resolved (existing cache, snapshot, or bundled).
+                new_matched = dataset["coverage"]["mapMunicipalityCount"]
+                if new_matched == 0 and _bundled_map_match_count(code) > 0:
+                    regressed[code] = (
+                        f"live fetch matched 0 municipalities to boundaries "
+                        f"(bundled baseline matches > 0); kept existing artifacts"
+                    )
+                    logger.warning(
+                        "warm(): %s live boundary/analytics join matched 0 municipalities "
+                        "but the bundled fallback matches some -- refusing to publish, "
+                        "keeping existing cache/snapshot/bundled data in place", code,
+                    )
+                    continue
+
                 _write_json_gz(_cache_path(_analytics_name(code)), dataset)
                 _write_json_gz(_cache_path(_boundary_name(code)), fc)
                 built.append(code)
@@ -412,10 +457,11 @@ def warm(force: bool = False) -> Dict[str, Any]:
                 except Exception:  # noqa: BLE001
                     logger.exception("warm(): strategy inventory failed for %s", code)
 
-        if not built:
-            # Nothing at all succeeded -- this is the one case that should
-            # still look like a hard failure to callers/retry logic, same as
-            # before this change.
+        if not built and not regressed:
+            # Nothing at all succeeded and nothing was intentionally held
+            # back either -- every country hit a hard error. That's the one
+            # case that should still look like a failure to callers/retry
+            # logic, same as before this change.
             raise RuntimeError(f"warm(): every country failed: {failed}")
 
         with _MEMO_LOCK:
@@ -429,6 +475,7 @@ def warm(force: bool = False) -> Dict[str, Any]:
             "duration_seconds": round(time.time() - started, 1),
             "countries": built,
             "failed_countries": failed,
+            "regressed_countries": regressed,
             "source": "databricks",
         }
         _write_json(_cache_path(_MANIFEST_NAME), man)
@@ -439,10 +486,11 @@ def warm(force: bool = False) -> Dict[str, Any]:
         _run_invalidation_hooks()
 
         _warm_state["last_ok"] = time.time()
-        _warm_state["last_error"] = f"partial: {failed}" if failed else None
+        problems = {**failed, **regressed}
+        _warm_state["last_error"] = f"partial: {problems}" if problems else None
         logger.info(
-            "warm(): done in %.1fs (built=%s, failed=%s)",
-            time.time() - started, ", ".join(built), failed or "none",
+            "warm(): done in %.1fs (built=%s, failed=%s, regressed=%s)",
+            time.time() - started, ", ".join(built), failed or "none", regressed or "none",
         )
         return man
     except Exception as exc:  # noqa: BLE001

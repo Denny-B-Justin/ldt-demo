@@ -64,6 +64,33 @@ def test_warm_writes_gzip_artifacts_and_manifest(isolated_cache, zmb_only):
     assert ds["coverage"]["analyticsMunicipalityCount"] == 2  # synthetic ZMB fixture
 
 
+def test_warm_refuses_to_publish_a_zero_coverage_regression(isolated_cache, zmb_only, monkeypatch):
+    """A live fetch that succeeds (no exception) but joins to zero
+    municipalities -- e.g. Nepal's live boundary table currently being
+    district-level only -- must not overwrite working bundled/cached data.
+    Fake a live feature collection whose compositeKeys can't possibly match
+    ZMB's analytics rows and confirm warm() holds back the publish."""
+    monkeypatch.setattr(
+        queries, "_assemble_feature_collection",
+        lambda code: {"type": "FeatureCollection", "features": [
+            {"type": "Feature", "properties": {"compositeKey": "Nowhere::Nowhere::Nowhere"}, "geometry": None}
+        ]},
+    )
+    man = datastore.warm(force=True)
+
+    assert man["countries"] == []
+    assert "ZMB" in man["regressed_countries"]
+    cache_dir = datastore.CACHE_DIR
+    assert not os.path.exists(os.path.join(cache_dir, datastore._analytics_name("ZMB")))
+    assert not os.path.exists(os.path.join(cache_dir, datastore._boundary_name("ZMB")))
+
+    # requests still get served -- from the bundled fallback, which the live
+    # fetch was correctly refused permission to clobber.
+    ds = datastore.analytics_dataset("ZMB")
+    fc = datastore.boundary_geojson("ZMB")
+    assert ds["municipalities"] and fc["features"]
+
+
 def test_warm_isolates_one_countrys_failure_from_the_others(isolated_cache, monkeypatch):
     """The fake executor only knows Zambia's tables (see conftest.py), so with
     every country in play, NPL/SRB's queries raise while ZMB's succeed. warm()
