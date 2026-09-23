@@ -172,6 +172,15 @@ replaced immediately instead of waiting out the freshness window. Unset it
 again afterwards; left on, it forces a full Databricks rebuild on every
 worker's startup.
 
+Each country is rebuilt and written independently within a single `warm()`
+run: a transient failure for one (a table briefly empty mid-data-release, a
+timed-out query) is logged and skipped rather than aborting the countries
+still queued behind it, so a bad moment for one country's tables can't leave
+the *other* countries' `.ldt_cache` artifacts stale or, on a fresh deploy with
+no prior successful warm, entirely absent. `manifest.json`'s `countries` list
+is only the countries that were actually rebuilt this run; a `failed_countries`
+map (also visible via `data_status()`) names any that were skipped and why.
+
 ### 3.2 Unity Catalog tables
 
 Per country (`NPL` / `SRB` / `ZMB`):
@@ -357,5 +366,12 @@ whether the cache dir is writable) — useful for a Connect health check.
 - Because Dash's rendering model differs fundamentally from
   Next.js/React (server-rendered component tree + callback graph vs.
   client-side component state), some interaction details - in particular
-  MapLibre's free-form pan/zoom map vs. Plotly's `Choroplethmap` trace -
-  are functionally equivalent rather than pixel-identical.
+  MapLibre's free-form pan/zoom map vs. Plotly's `Choropleth` trace -
+  are functionally equivalent rather than pixel-identical. The choropleth
+  deliberately uses the classic vector-based `go.Choropleth` ("geo") trace
+  rather than the MapLibre-based `go.Figure`/`go.Figurebox`:
+  this app runs behind a corporate firewall that can silently block the
+  browser's outbound tile requests those traces need, which previously left
+  the map blank with no visible error. `go.Choropleth` draws polygons from
+  vector data with no browser-side network calls at all, so it can't be
+  blocked that way.

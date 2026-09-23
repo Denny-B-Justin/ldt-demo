@@ -378,15 +378,32 @@ def warm(force: bool = False) -> Dict[str, Any]:
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
         built: List[str] = []
+        failed: Dict[str, str] = {}
         for country in constants.COUNTRIES:
             code = country["code"]
             logger.info("warm(): assembling %s", code)
-            dataset = queries._assemble_dataset(code)
-            fc = queries._assemble_feature_collection(code)
-            _apply_map_coverage(dataset, fc)
-            _write_json_gz(_cache_path(_analytics_name(code)), dataset)
-            _write_json_gz(_cache_path(_boundary_name(code)), fc)
-            built.append(code)
+            # Each country is independent: previously, a failure assembling
+            # or writing *any one* country (a transient Databricks hiccup, a
+            # table briefly empty mid-data-release, one bad row) raised out
+            # of this loop and skipped every country after it for this run
+            # -- e.g. if NPL was fine but SRB's query failed, ZMB was never
+            # even attempted, leaving its .ldt_cache artifacts stale or (on
+            # a fresh deploy with no prior successful warm) entirely absent.
+            # That looked exactly like "the cache is missing data" even
+            # though nothing was wrong with the write/read of the .gz files
+            # themselves. Isolate each country so one failure can't starve
+            # the rest.
+            try:
+                dataset = queries._assemble_dataset(code)
+                fc = queries._assemble_feature_collection(code)
+                _apply_map_coverage(dataset, fc)
+                _write_json_gz(_cache_path(_analytics_name(code)), dataset)
+                _write_json_gz(_cache_path(_boundary_name(code)), fc)
+                built.append(code)
+            except Exception as exc:  # noqa: BLE001
+                failed[code] = str(exc)
+                logger.exception("warm(): %s failed; leaving its existing cache in place", code)
+                continue
             if country["slug"] in constants.STRATEGY_INVENTORY_SLUGS:
                 try:
                     inventory = queries._build_strategy_inventory(code)
@@ -394,6 +411,12 @@ def warm(force: bool = False) -> Dict[str, Any]:
                         _write_json_gz(_cache_path(_strategy_name(code)), inventory)
                 except Exception:  # noqa: BLE001
                     logger.exception("warm(): strategy inventory failed for %s", code)
+
+        if not built:
+            # Nothing at all succeeded -- this is the one case that should
+            # still look like a hard failure to callers/retry logic, same as
+            # before this change.
+            raise RuntimeError(f"warm(): every country failed: {failed}")
 
         with _MEMO_LOCK:
             _MEMO.clear()
@@ -405,6 +428,7 @@ def warm(force: bool = False) -> Dict[str, Any]:
             "built_at_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "duration_seconds": round(time.time() - started, 1),
             "countries": built,
+            "failed_countries": failed,
             "source": "databricks",
         }
         _write_json(_cache_path(_MANIFEST_NAME), man)
@@ -415,8 +439,11 @@ def warm(force: bool = False) -> Dict[str, Any]:
         _run_invalidation_hooks()
 
         _warm_state["last_ok"] = time.time()
-        _warm_state["last_error"] = None
-        logger.info("warm(): done in %.1fs (%s)", time.time() - started, ", ".join(built))
+        _warm_state["last_error"] = f"partial: {failed}" if failed else None
+        logger.info(
+            "warm(): done in %.1fs (built=%s, failed=%s)",
+            time.time() - started, ", ".join(built), failed or "none",
+        )
         return man
     except Exception as exc:  # noqa: BLE001
         _warm_state["last_error"] = str(exc)

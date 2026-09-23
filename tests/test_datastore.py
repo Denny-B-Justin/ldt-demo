@@ -64,6 +64,24 @@ def test_warm_writes_gzip_artifacts_and_manifest(isolated_cache, zmb_only):
     assert ds["coverage"]["analyticsMunicipalityCount"] == 2  # synthetic ZMB fixture
 
 
+def test_warm_isolates_one_countrys_failure_from_the_others(isolated_cache, monkeypatch):
+    """The fake executor only knows Zambia's tables (see conftest.py), so with
+    every country in play, NPL/SRB's queries raise while ZMB's succeed. warm()
+    must still persist ZMB's artifacts and report success instead of the one
+    failure wiping out every country's chance to be written this run."""
+    monkeypatch.setattr(queries, "_list_volume_tree", lambda *a, **k: [])
+    man = datastore.warm(force=True)
+
+    assert man["countries"] == ["ZMB"]
+    assert set(man["failed_countries"]) == {"NPL", "SRB"}
+    cache_dir = datastore.CACHE_DIR
+    assert os.path.exists(os.path.join(cache_dir, datastore._analytics_name("ZMB")))
+    assert not os.path.exists(os.path.join(cache_dir, datastore._analytics_name("NPL")))
+
+    ds = datastore.analytics_dataset("ZMB")
+    assert ds["coverage"]["analyticsMunicipalityCount"] == 2  # synthetic ZMB fixture
+
+
 def test_accessor_never_calls_databricks(isolated_cache, zmb_only, monkeypatch):
     def _boom(*_a, **_k):
         raise AssertionError("datastore accessor hit the live query path")
