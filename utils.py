@@ -327,7 +327,7 @@ def build_choropleth_figure(
         )
     )
     fig.update_layout(
-        map=dict(style="carto-darkmatter" if dark else "carto-positron", zoom=5.2, center=_map_center(features)),
+        map=dict(style="open-street-map", zoom=5.2, center=_map_center(features)),
         margin=dict(l=0, r=0, t=10, b=0),
         paper_bgcolor=colors["chart_surface"],
         height=560,
