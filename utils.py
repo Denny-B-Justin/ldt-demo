@@ -571,3 +571,130 @@ def build_publication_year_chart(year_counts: List[Dict[str, Any]], dark: bool =
 
 def wrap_chart(figure: go.Figure, chart_id: str) -> dcc.Graph:
     return dcc.Graph(id=chart_id, figure=figure, config={"displaylogo": False, "responsive": True})
+
+
+# --------------------------------------------------------------------------
+# Chart builder - population distribution curve
+# (src/components/nepal/sng-display-section.tsx: buildCurveRows + the
+# cumulative-share Plotly chart, generalized to any country's municipalities)
+# --------------------------------------------------------------------------
+
+def build_population_distribution_rows(municipalities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Rank municipalities by population ascending and compute each one's
+    cumulative share of total population. Port of `buildCurveRows`."""
+    valid = [
+        m for m in municipalities
+        if m.get("context", {}).get("population") is not None and m["context"]["population"] >= 0
+    ]
+    valid.sort(key=lambda m: m["context"]["population"])
+    total_population = sum(m["context"]["population"] for m in valid)
+
+    rows = []
+    cumulative = 0.0
+    for index, m in enumerate(valid):
+        cumulative += m["context"]["population"]
+        rows.append({
+            "municipality": m["municipality"],
+            "province": m["province"],
+            "population": m["context"]["population"],
+            "rank": index + 1,
+            "cumulativeShare": (cumulative / total_population) if total_population > 0 else 0.0,
+        })
+    return rows
+
+
+def build_population_distribution_figure(
+    rows: List[Dict[str, Any]],
+    lower_singular: str,
+    higher_singular: str,
+    dark: bool = False,
+) -> go.Figure:
+    """Cumulative population-share curve with Small/Medium/Large tertile
+    dividers, as in sng-display-section.tsx's "Population distribution"
+    chart. ``rows`` is the output of `build_population_distribution_rows`."""
+    logger.debug("Building population distribution figure for %s rows", len(rows))
+    colors = constants.COLORS_DARK if dark else constants.COLORS_LIGHT
+    total_rows = len(rows)
+
+    if total_rows == 0:
+        fig = go.Figure()
+        fig.update_layout(
+            template="plotly_dark" if dark else "plotly_white",
+            paper_bgcolor=colors["chart_surface"],
+            plot_bgcolor=colors["chart_surface"],
+            font=dict(color=colors["chart_text"]),
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            annotations=[dict(
+                text="No population data available.", showarrow=False,
+                font=dict(size=14, color=colors["chart_text"]), x=0.5, y=0.5,
+            )],
+            height=460,
+            margin=dict(l=20, r=20, t=20, b=20),
+        )
+        return fig
+
+    first_tertile = total_rows // 3
+    second_tertile = (2 * total_rows) // 3
+
+    def tertile_population_label(index: int) -> str:
+        if index <= 0 or index > total_rows:
+            return "n/a"
+        return f"{rows[index - 1]['population']:,.0f}"
+
+    fig = go.Figure(
+        go.Scatter(
+            x=[r["rank"] for r in rows],
+            y=[r["cumulativeShare"] for r in rows],
+            mode="lines+markers",
+            text=[r["municipality"] for r in rows],
+            customdata=[[r["province"], r["population"]] for r in rows],
+            marker=dict(color=colors["chart_1"], size=6),
+            line=dict(color=colors["chart_1"], width=3),
+            hovertemplate=(
+                f"{lower_singular}: %{{text}}<br>{higher_singular}: %{{customdata[0]}}<br>"
+                "Rank: %{x}<br>Population: %{customdata[1]:,}<br>"
+                "Cumulative share: %{y:.2%}<extra></extra>"
+            ),
+        )
+    )
+
+    groups = [
+        ("Small", colors["negative"], first_tertile / 2, tertile_population_label(first_tertile)),
+        ("Medium", colors["chart_5"], (first_tertile + second_tertile) / 2, tertile_population_label(second_tertile)),
+        ("Large", colors["positive"], (second_tertile + total_rows) / 2, tertile_population_label(total_rows)),
+    ]
+    annotations = []
+    for label, color, x_pos, value_label in groups:
+        annotations.append(dict(x=x_pos, y=0.54, text=label, showarrow=False, font=dict(size=22, color=color)))
+        annotations.append(dict(
+            x=x_pos, y=0.43, text=value_label, showarrow=False,
+            font=dict(size=12, color=colors["chart_text"]),
+        ))
+
+    fig.update_layout(
+        template="plotly_dark" if dark else "plotly_white",
+        paper_bgcolor=colors["chart_surface"],
+        plot_bgcolor=colors["chart_surface"],
+        font=dict(color=colors["chart_text"]),
+        showlegend=False,
+        shapes=[
+            dict(type="line", xref="x", yref="y", y0=0, y1=1, x0=tertile, x1=tertile,
+                 line=dict(color=colors["chart_text"], width=2))
+            for tertile in (first_tertile, second_tertile)
+        ],
+        annotations=annotations,
+        xaxis=dict(
+            title="Population rank (smallest to largest)",
+            gridcolor=colors["chart_grid"], zerolinecolor=colors["chart_axis"], color=colors["chart_tick"],
+            range=[1, max(total_rows, 1)],
+        ),
+        yaxis=dict(
+            title="Cumulative share",
+            gridcolor=colors["chart_grid"], zerolinecolor=colors["chart_axis"], color=colors["chart_tick"],
+            range=[0, 1], tickformat=".0%",
+        ),
+        margin=dict(l=60, r=20, t=30, b=50),
+        height=460,
+    )
+    return fig
