@@ -565,17 +565,20 @@ def _assemble_dataset(country_code: str) -> Dict[str, Any]:
         score_cols, config["year_column_candidates"], table=config["scores_table"], role="year"
     )
 
-    # Resolve every raw source column once, tolerantly.
+    # Resolve every raw source column once, tolerantly. A handful of raw
+    # names also have a known alternate spelling (see
+    # constants.RAW_COLUMN_ALIASES, e.g. Vietnam's snake_case schema) that
+    # is tried after the primary name.
     indicator_col_map = {
-        raw: _resolve_column(admin_cols, [raw])
+        raw: _resolve_column(admin_cols, [raw] + constants.RAW_COLUMN_ALIASES.get(raw, []))
         for raw in constants.ADMIN_CANONICAL_MAPPINGS
     }
     context_col_map = {
-        raw: _resolve_column(admin_cols, [raw])
+        raw: _resolve_column(admin_cols, [raw] + constants.RAW_COLUMN_ALIASES.get(raw, []))
         for raw in constants.CONTEXT_COLUMN_MAPPINGS
     }
     score_col_map = {
-        raw: _resolve_column(score_cols, [raw])
+        raw: _resolve_column(score_cols, [raw] + constants.RAW_COLUMN_ALIASES.get(raw, []))
         for raw in constants.SCORE_CANONICAL_MAPPINGS
     }
     _log_unresolved(config["admin_table"], "indicator", indicator_col_map)

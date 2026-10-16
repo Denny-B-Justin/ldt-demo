@@ -92,17 +92,19 @@ def test_warm_refuses_to_publish_a_zero_coverage_regression(isolated_cache, zmb_
 
 
 def test_warm_isolates_one_countrys_failure_from_the_others(isolated_cache, monkeypatch):
-    """The fake executor only knows Zambia's tables (see conftest.py), so with
-    every country in play, NPL/SRB's queries raise while ZMB's succeed. warm()
-    must still persist ZMB's artifacts and report success instead of the one
-    failure wiping out every country's chance to be written this run."""
+    """The fake executor only knows Zambia's and Vietnam's tables (see
+    conftest.py), so with every country in play, NPL/SRB's queries raise
+    while ZMB/VNM succeed. warm() must still persist ZMB/VNM's artifacts and
+    report success instead of the one failure wiping out every country's
+    chance to be written this run."""
     monkeypatch.setattr(queries, "_list_volume_tree", lambda *a, **k: [])
     man = datastore.warm(force=True)
 
-    assert man["countries"] == ["ZMB"]
+    assert set(man["countries"]) == {"ZMB", "VNM"}
     assert set(man["failed_countries"]) == {"NPL", "SRB"}
     cache_dir = datastore.CACHE_DIR
     assert os.path.exists(os.path.join(cache_dir, datastore._analytics_name("ZMB")))
+    assert os.path.exists(os.path.join(cache_dir, datastore._analytics_name("VNM")))
     assert not os.path.exists(os.path.join(cache_dir, datastore._analytics_name("NPL")))
 
     ds = datastore.analytics_dataset("ZMB")

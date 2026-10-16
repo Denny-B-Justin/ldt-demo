@@ -341,7 +341,7 @@ def render_about() -> html.Main:
                     "for the pim-pam.net Geospatial Planning and Budgeting Local Development "
                     "Tracker tool. The LDT is designed to identify key development and public "
                     "investment gaps at sub-national levels, illustrated through applications "
-                    "in Nepal, Serbia, and Zambia.",
+                    "in Nepal, Serbia, Vietnam, and Zambia.",
                     className="lede",
                 ),
             ]),
