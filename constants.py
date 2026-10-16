@@ -139,6 +139,7 @@ FOOTER_NAV_ITEMS = [
 COUNTRY_WORKSPACE_LINKS = [
     {"href": "?page=nepal", "label": "Nepal"},
     {"href": "?page=serbia", "label": "Serbia"},
+    {"href": "?page=vietnam", "label": "Vietnam"},
     {"href": "?page=zambia", "label": "Zambia"},
 ]
 
@@ -425,6 +426,99 @@ COUNTRIES = [
                 "Local/SNG planning documents are available for AI-assisted "
                 "analysis where source links are loaded."
             ),
+        },
+    },
+
+    {
+        "code": "VNM",
+        "slug": "vietnam",
+        "name": "Vietnam",
+        "analytics_status": "live",
+        "fallback_data_path": "data/vietnam/analytics-data.json",
+        "map_data_path": "data/vietnam/municipalities.geojson",
+        "strategy_inventory_path": None,
+        "admin_labels": {
+            "lower": {"singular": "Municipality", "plural": "Municipalities"},
+            "middle": {"singular": "District", "plural": "Districts"},
+            "higher": {"singular": "Province", "plural": "Provinces"},
+        },
+        "admin_level_guide": {
+            "summary": (
+                "The LDT uses Vietnam's province-to-local-level structure so users "
+                "can compare municipalities while still reading results in their "
+                "provincial planning context."
+            ),
+            "levels": [
+                {
+                    "label": "Admin level 1",
+                    "name": "Province",
+                    "description": (
+                        "Provinces are the higher subnational frame used on the "
+                        "country page to group municipalities and summarize "
+                        "geographic coverage."
+                    ),
+                },
+                {
+                    "label": "Admin level 2",
+                    "name": "Municipality / local level",
+                    "description": (
+                        "Municipalities and rural municipalities are the local "
+                        "government units used for LDT analytics. Vietnam's local "
+                        "level includes metropolitan cities, sub-metropolitan "
+                        "cities, municipalities, and rural municipalities."
+                    ),
+                },
+            ],
+            "note": (
+                "As part of a historic administrative overhaul implemented on July 1, 2025"
+                "Vietnam shifted from a three-tier local governance structure to a streamlined two-tier local model."
+                "The district level—consisting of nearly 700 urban and rural district units—was entirely abolished to" 
+                "remove intermediate bureaucratic layers and cut administrative overheads. What remains under the central" 
+                "government is a unified, two-level rollup consisting of the consolidated provincial level (reduced from 63 to 34 provinces" 
+                "and centrally run cities) and the grassroots commune level (comprising wards, communes, and island special zones)."
+            ),
+            "source_links": [
+                {
+                    "label": "Local government in Vietnam",
+                    "href": "https://en.wikipedia.org/wiki/Local_government_in_Vietnam",
+                },
+                {
+                    "label": "Administrative divisions of Vietnam",
+                    "href": "https://en.wikipedia.org/wiki/Administrative_divisions_of_Vietnam",
+                },
+            ],
+        },
+        "profile": {
+            "population_millions": None,
+            "area_km2": None,
+            "context": {
+                "summary": (
+                    "Vietnam provides the baseline country workspace for the LDT, "
+                    "with local analytics organized around provinces, districts, "
+                    "and municipalities across a multi-year score release."
+                ),
+                "highlights": [
+                    "The workspace is useful for comparing municipality-level "
+                    "variation across terrain, population distribution, and "
+                    "service access patterns.",
+                    "Planning-document coverage is organized at province level "
+                    "for AI-assisted local plan context.",
+                    "The latest release now supports 2021-2025 time-series "
+                    "exploration for the core PIL scores.",
+                ],
+                "source_links": [
+                    {"label": "Ministry of Planning and Investment", "href": "http://www.mpi.gov.vn/"},
+                ],
+            },
+            "strategy": {
+                "title": "Vision to 2035",
+                "url": "https://vietnam.gov.vn/period-20112020/industrial-development-strategy-through-2025-vision-to-2035-10054959",
+            },
+        },
+        "planning_documents": {
+            "ai_enabled": True,
+            "plan_source_admin_level": "higher",
+            "message": "Planning documents are available for AI-assisted analysis.",
         },
     },
 ]
@@ -1857,6 +1951,35 @@ CONTEXT_COLUMN_MAPPINGS = {
     "Railway Heatwave Risk (km)": "railwayHeatwaveRiskKm",
 }
 
+# ADMIN_CANONICAL_MAPPINGS / CONTEXT_COLUMN_MAPPINGS keys above are the exact
+# NPL/SRB/ZMB column names (Databricks sanitizes "(%)", "/" etc. to repeated
+# underscores, which the tolerant `_resolve_column` match in queries.py still
+# resolves correctly). Vietnam's tables (`ldt_indicators_vietnam` /
+# `ldt_scores_vietnam`) use plain snake_case column names instead, and for a
+# handful of columns that spelling doesn't collapse to the same normalized
+# string as the NPL/SRB/ZMB-derived key (e.g. the literal "%" in "(%)" leaves
+# no trace once stripped, while Vietnam spells it out as "_pct"; "Total Land
+# Area (km2)" carries a "Total " prefix Vietnam's "land_area_km2" does not).
+# This maps each such canonical key to extra raw-name candidates tried, in
+# order, after the key itself -- same tolerant matching, just given the exact
+# alternate spelling to look for. Harmless for every other country since
+# these alternate strings never appear in their tables.
+RAW_COLUMN_ALIASES = {
+    "Accessibility to Hospitals (%)": ["accessibility_to_hospitals_pct"],
+    "Accessibility to Schools (%)": ["accessibility_to_schools_pct"],
+    "Key Structures without Access to Broadband Internet (%)": [
+        "key_structures_without_access_to_broadband_internet_pct"
+    ],
+    "Average PM25 Concentration (ug/m3)": ["average_pm25_concentration_ug_per_m3"],
+    "Change in Build Area (%)": ["change_in_build_area_pct"],
+    "Change in Forest Area (%)": ["change_in_forest_area_pct"],
+    "Road Flood Risk (%)": ["road_flood_risk_pct"],
+    "Road Heatwave Risk (%)": ["road_heatwave_risk_pct"],
+    "Railway Flood Risk (%)": ["railway_flood_risk_pct"],
+    "Railway Heatwave Risk (%)": ["railway_heatwave_risk_pct"],
+    "Total Land Area (km2)": ["land_area_km2"],
+}
+
 # The three pillar scores and their component labels (order matters - it is
 # the display order of the waterfall rows).
 SCORE_DEFINITIONS = [
@@ -2015,6 +2138,51 @@ COUNTRY_DATA_SOURCES = {
         "simplify_tolerance": 0.0008,
         "documents_subdir": "Serbia",
         "expected_lsg_count": 161,
+    },
+    "VNM": {
+        "release_key_prefix": "vnm",
+        "admin_table": "ldt_indicators_vietnam",
+        "scores_table": "ldt_scores_vietnam",
+        "boundary_table": "ldt_boundaries_admin2_vietnam",
+        "year_column": "year",
+        "year_column_candidates": ["year", "Year", "release_year", "data_year"],
+        # Vietnam's July 2025 administrative reform collapsed the district
+        # tier entirely (see admin_level_guide note on the VNM entry in
+        # COUNTRIES above): `ldt_indicators_vietnam` / `ldt_scores_vietnam`
+        # only carry Province + Municipality columns, no District. Pointing
+        # "district" at "Province" (rather than a non-existent "District")
+        # resolves cleanly instead of logging an unresolved-column warning on
+        # every dataset build, and mirrors the boundary table below, which
+        # has the same two-tier shape (NAM_1 is reused for both roles).
+        "admin_columns": {
+            "municipality": "Municipality",
+            "district": "Province",
+            "province": "Province",
+        },
+        # Unused by queries.py (boundary roles are resolved from the
+        # *_candidates lists below) -- kept only for readability, so it
+        # reflects ldt_boundaries_admin2_vietnam's real NAM_1/NAM_2 columns
+        # rather than the GPBP-style names other countries' boundary tables use.
+        "boundary_columns": {
+            "municipality": "NAM_2",
+            "district": "NAM_1",
+            "province": "NAM_1",
+        },
+        "boundary_municipality_candidates": [
+            "Municipality", "NAM_2", "ADM2_EN", "admin2", "shapeName", "name_2", "NAME_2",
+        ],
+        "boundary_district_candidates": [
+            "District", "NAM_1", "ADM1_EN", "admin1", "name_1", "NAME_1",
+        ],
+        "boundary_province_candidates": [
+            "Province", "NAM_1", "ADM1_EN", "admin1", "name_1", "NAME_1",
+        ],
+        "geometry_column_candidates": [
+            "geometry_wkt", "geometry_wkb", "geometry", "geom", "wkt", "geojson", "shape",
+        ],
+        "boundary_crs": "EPSG:4326",
+        "simplify_tolerance": 0.0008,
+        "documents_subdir": "Vietnam",
     },
 }
 

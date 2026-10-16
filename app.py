@@ -341,7 +341,7 @@ def render_about() -> html.Main:
                     "for the pim-pam.net Geospatial Planning and Budgeting Local Development "
                     "Tracker tool. The LDT is designed to identify key development and public "
                     "investment gaps at sub-national levels, illustrated through applications "
-                    "in Nepal, Serbia, and Zambia.",
+                    "in Nepal, Serbia, Vietnam, and Zambia.",
                     className="lede",
                 ),
             ]),
@@ -794,6 +794,7 @@ def render_country_landing(slug: str) -> html.Main:
 
     return html.Main(
         children=[
+            dcc.Store(id={"type": "country-landing-store", "country": country["slug"]}, data=country["code"]),
             html.Section(className="hero-section", children=html.Div(className="hero-inner", children=[
                 html.H1(f"{country['name']} subnational analytics for local economic development"),
                 html.P(
@@ -863,6 +864,20 @@ def render_country_landing(slug: str) -> html.Main:
                     html.Summary(plan_disclosure["description"], style={"cursor": "pointer", "color": "var(--muted-foreground)"}),
                     html.Div(style={"marginTop": "1rem"}, children=build_plan_availability_groups(country, dataset)),
                 ]),
+                html.Div(className="content-card", style={"marginTop": "1.5rem"}, children=[
+                    html.P("Detailed SNG metrics", className="eyebrow"),
+                    html.H3(f"{lower_p} metrics and population distribution"),
+                    html.P(
+                        f"{lower_p} are ranked from smallest to largest population and grouped "
+                        f"into tertiles so {lower_p_label} size can be read alongside the PIL "
+                        f"scores in the table below.",
+                        className="small muted",
+                    ),
+                    html.Div(
+                        id={"type": "country-landing-population-chart", "country": country["slug"]},
+                        style={"marginTop": "1rem"},
+                    ),
+                ]),
                 html.Div(style={"marginTop": "1.5rem"}, children=build_sng_table(country, dataset)),
                 html.Button(f"Download {lower_s_label} metrics CSV", id={"type": "sng-csv-button", "country": country["slug"]}, n_clicks=0, className="btn btn-secondary", style={"marginTop": "1rem"}),
             ])),
@@ -893,6 +908,29 @@ def build_plan_availability_groups(country: Dict[str, Any], dataset: Dict[str, A
             ] + ([html.Span(f"+{len(unit_names) - 12} more", className="badge badge-outline")] if len(unit_names) > 12 else [])),
         ]))
     return items
+
+
+def build_population_distribution_chart(country: Dict[str, Any], dataset: Dict[str, Any], dark: bool = False) -> html.Div:
+    """Port of the "Population distribution by {lower}" chart in
+    src/components/nepal/sng-display-section.tsx."""
+    latest_year = max(dataset.get("years", [dataset.get("release", {}).get("year", 0)]))
+    rows = [m for m in dataset["municipalities"] if m["year"] == latest_year]
+    admin = country["admin_labels"]
+    lower_s, higher_s = admin["lower"]["singular"], admin["higher"]["singular"]
+
+    curve_rows = utils.build_population_distribution_rows(rows)
+    fig = utils.build_population_distribution_figure(curve_rows, lower_s, higher_s, dark=dark)
+
+    return html.Div(className="content-card", children=[
+        html.H4(f"Population distribution by {utils.lower_first(lower_s)}"),
+        html.P(
+            f"{admin['lower']['plural']} are ranked from smallest to largest population and "
+            f"plotted against cumulative population share. Tertile guides separate the "
+            f"reference groups used for small, medium, and large {utils.lower_first(lower_s)} analysis.",
+            className="small muted",
+        ),
+        html.Div(className="dash-graph", style={"marginTop": "0.75rem"}, children=utils.wrap_chart(fig, f"population-distribution-graph-{country['slug']}")),
+    ])
 
 
 def build_sng_table(country: Dict[str, Any], dataset: Dict[str, Any], preview: int = 8):
@@ -1419,6 +1457,27 @@ def download_sng_csv(n_clicks_list):
     except Exception:
         logger.exception("CSV export failed for country %s.", country_slug)
         raise
+
+
+@app.callback(
+    Output({"type": "country-landing-population-chart", "country": ALL}, "children"),
+    Input("theme-store", "data"),
+    State({"type": "country-landing-store", "country": ALL}, "data"),
+)
+def update_country_population_chart(theme_data, country_codes):
+    if not country_codes:
+        raise PreventUpdate
+    dark = (theme_data or {}).get("theme") == "dark"
+    outputs = []
+    for country_code in country_codes:
+        country = constants.COUNTRY_BY_CODE.get(country_code)
+        try:
+            dataset = queries.load_country_dataset(country_code)
+            outputs.append(build_population_distribution_chart(country, dataset, dark=dark))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Population distribution chart failed for %s.", country_code)
+            outputs.append(html.P(f"Could not load the population distribution chart ({exc}).", className="small muted"))
+    return outputs
 
 
 # ==========================================================================

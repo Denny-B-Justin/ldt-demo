@@ -73,11 +73,13 @@ INDICATOR_TABLES = [
     "ldt_gpbp_ldt_npl_admin_2_demo",
     "ldt_gpbp_ldt_srb_admin_2_demo",
     "ldt_gpbp_ldt_zmb_admin_2_demo",
+    "ldt_indicators_vietnam",
 ]
 SCORE_TABLES = [
     "ldt_gpbp_ldt_npl_scores_admin_2_demo",
     "ldt_gpbp_ldt_srb_scores_admin_2_demo",
     "ldt_gpbp_ldt_zmb_scores_admin_2_demo",
+    "ldt_scores_vietnam",
 ]
 BOUNDARY_TABLES = [
     "ldt_boundaries_admin0_nepal",
@@ -89,6 +91,9 @@ BOUNDARY_TABLES = [
     "ldt_boundaries_admin0_zambia",
     "ldt_boundaries_admin1_zambia",
     "ldt_boundaries_admin2_zambia",
+    "ldt_boundaries_admin0_vietnam",
+    "ldt_boundaries_admin1_vietnam",
+    "ldt_boundaries_admin2_vietnam",
 ]
 
 # Column names that might carry the observation year, tried in order.

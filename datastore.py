@@ -225,8 +225,23 @@ def _load_artifact(memo_key: str, name: str, bundled: Optional[str], builder: Ca
         try:
             value = _read_json_maybe_gz(path)
             with _MEMO_LOCK:
+                had_older_value = _MEMO.get(memo_key) is not None
                 _MEMO[memo_key] = (mtime, value)
             logger.debug("datastore: loaded %s from %s", memo_key, path)
+            if had_older_value:
+                # This artifact changed on disk since we last served it --
+                # e.g. another worker process ran warm() and wrote a fresh
+                # file, and this process only just noticed via the mtime
+                # check above. warm() clears memo.py's per-process keyed
+                # caches (analytics tab content, figures, ...) itself when
+                # *it* runs, but that does nothing for sibling processes that
+                # pick up the new file passively here -- without this, a
+                # worker that never ran warm() itself would keep serving
+                # stale computed payloads (e.g. "n/a" indicator values)
+                # built from the old artifact, forever, even though
+                # analytics_dataset()/boundary_geojson() now return fresh
+                # data.
+                _run_invalidation_hooks()
             _schedule_warm_if_stale()
             return value
         except Exception:  # noqa: BLE001
